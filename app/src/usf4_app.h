@@ -18,12 +18,34 @@
 #include "usf4_script_input.h"
 #include "usf4_snapshot.h"
 
+#if defined(USF4_BUILTIN_CONFIG)
+#include "usf4_builtin_config.h"  // generated from app/usf4_switch_defaults.toml (CMake)
+#endif
+
 class Usf4App : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(rex::ui::WindowedAppContext& ctx) {
     return std::unique_ptr<Usf4App>(new Usf4App(ctx, "usf4", PPCImageConfig));
+  }
+
+  // The Switch build's fixed settings (app/usf4_switch_defaults.toml, compiled in): applied before usf4.toml, which
+  // holds only the player's options (and may still override any of these).
+  std::string_view BuiltInConfig() const override {
+#if defined(USF4_BUILTIN_CONFIG)
+    return kUsf4BuiltInConfig;
+#else
+    return {};
+#endif
+  }
+  // Without a usf4.toml next to the NRO, the player's default one is written there (app/usf4_switch.toml).
+  std::string_view DefaultConfigFile() const override {
+#if defined(USF4_BUILTIN_CONFIG)
+    return kUsf4PlayerConfig;
+#else
+    return {};
+#endif
   }
 
   void OnPostInitLogging() override {

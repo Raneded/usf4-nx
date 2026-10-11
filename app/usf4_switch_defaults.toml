@@ -1,0 +1,26 @@
+# Ultra Street Fighter IV, Switch build: fixed settings compiled into the NRO (src/usf4_app.h BuiltInConfig), applied
+# before the player's usf4.toml next to the NRO, which may still override any of them key by key.
+
+# The native Vulkan renderer (NVK); the emulated GPU is far too slow on the console.
+sa2_renderer_native = true
+sa2_render_height_handheld = 720
+sa2_render_height_docked = 1080
+sa2_shader_misses = ""
+
+# First console builds: keep a log on the SD card (sdmc:/switch/usf4-nx/logs) to diagnose boots. sa2-nx's release
+# turns it off ("off", false) once the port is stable.
+log_level = "info"
+log_to_file = true
+
+# Game frame rate in the log every 5 s (src/usf4_frame_counter.cpp).
+usf4_fps_log = true
+
+# The renderer's enhancements (sa2-nx docs/enhancements.md), as on PC: every key is on unless listed here.
+sa2_cpu_enhancements = true
+sa2_noncpu_enhancements = true
+
+# Game files: read the game_root folder next to the NRO directly. The SDK's asset pack (one .nxpack built from the
+# folder on the first boot) would be a second 7.7 GB copy on the card, more than FAT32's 4 GB per file, and USF4's
+# data is already a few large archives (battle.eaf 2.8 GB, ...), so it would save few file opens. A pack made on the
+# PC (tools/build_asset_pack.py) is still used if present, on an exFAT card.
+asset_pack_build = false

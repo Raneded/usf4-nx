@@ -141,3 +141,24 @@ CMake, Ninja, `libx11-xcb-dev` and `libwayland-dev`. The SDK's shared libraries 
 (`LD_LIBRARY_PATH`, the boot test sets it). glslangValidator:
 `cmake -S sdk/thirdparty/glslang -B out/glslang -G Ninja -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF && ninja -C out/glslang glslangValidator`.
 DXC: Microsoft's Linux release unpacked into `out/tools/dxc`.
+
+## Switch (stage 5)
+
+Built on Linux in devkitPro's Docker image, with the repository mounted at the same path:
+
+```sh
+D=$PWD/..; R=$PWD
+docker run --rm -v $D:$D -w $R devkitpro/devkita64 bash -c "cmake -S sdk/thirdparty/glslang -B out/glslang-dkp -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF -DENABLE_HLSL=OFF && ninja -C out/glslang-dkp glslangValidator"
+# The Mesa Horizon SDK (nfsmw-nx's Mesa 26.2.2), with libvulkan.a repacked (docs/usf4-notes.md, "Stage 5"):
+python3 tools/switch/repack_archive.py <sdk>/lib/libvulkan.a <copy of the sdk>/lib/libvulkan.a --ar aarch64-none-elf-ar
+docker run --rm -v $D:$D -w $R -e DEVKITPRO=/opt/devkitpro devkitpro/devkita64 bash -c "cmake -S app -B out/nx -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$R/tools/switch/cmake/switch-devkitA64.cmake \
+  -DREXGLUE_SWITCH_NVK_SDK=<copy of the sdk> -DSA2_GLSLANG_VALIDATOR=$R/out/glslang-dkp/StandAlone/glslangValidator \
+  -DDEVKITPRO=/opt/devkitpro [-DUSF4_SWITCH_LTO=OFF] && cmake --build out/nx -j 8"
+tools/linux/package_switch.sh          # out/nx/usf4-nx-switch.zip
+```
+
+On the SD card: `sdmc:/switch/usf4-nx/` with the NRO and the shader package, and your extracted disc as
+`sdmc:/switch/usf4-nx/game_root/` (without `$SystemUpdate`). Launch through a title takeover (hold R while starting a
+game) or a forwarder with full memory.

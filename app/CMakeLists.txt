@@ -136,10 +136,12 @@ foreach(_dep xxhash renderdoc)
 endforeach()
 
 # Settings template next to the executable, only when there is none yet (the copy there is the user's to edit).
-add_custom_command(TARGET usf4 POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/usf4.toml -DDST=$<TARGET_FILE_DIR:usf4>/usf4.toml
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_if_missing.cmake"
-    VERBATIM)
+if(NOT REXGLUE_PLATFORM_SWITCH)  # the Switch writes its usf4.toml itself (DefaultConfigFile)
+    add_custom_command(TARGET usf4 POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/usf4.toml -DDST=$<TARGET_FILE_DIR:usf4>/usf4.toml
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_if_missing.cmake"
+        VERBATIM)
+endif()
 
 # The SDK compiles itself with these (directory scope), but they do not reach the generated game code, which is
 # built in this directory. Fused multiply-add from separate PPC fmul/fadd drifts from the Xbox 360's results, and
@@ -150,4 +152,55 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             target_compile_options(${target} PRIVATE -ffp-contract=off -fno-strict-aliasing)
         endif()
     endforeach()
+endif()
+
+# --- Nintendo Switch (stage 5) ------------------------------------------------------------------------------------
+# Configure with the devkitA64 toolchain and the Mesa Horizon SDK (docs/building.md, "Switch"):
+#   cmake -S app -B out/nx -G Ninja -DCMAKE_BUILD_TYPE=Release
+#         -DCMAKE_TOOLCHAIN_FILE=tools/switch/cmake/switch-devkitA64.cmake
+#         -DREXGLUE_SWITCH_NVK_SDK=<mesa-...-horizon-sdk>/opt/devkitpro/portlibs/switch -DSA2_GLSLANG_VALIDATOR=<host tool>
+# Ported from sa2-nx's app/CMakeLists.txt (the parts that apply: no stage DLL, no PGO profile and no hot-function
+# order for USF4 yet).
+if(REXGLUE_PLATFORM_SWITCH)
+    # usf4_register.cpp is one generated function of ~40,000 SetFunction calls that runs once at startup: GCC -O3
+    # spends many minutes on it for nothing measurable (sa2-nx, from sasrt-nx).
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/usf4_register.cpp" APPEND PROPERTY
+                 COMPILE_OPTIONS -O0)
+
+    # Link-time optimisation of the game code and the app (sa2-nx: nfsmw-nx / UnleashedRecomp-NX's set). The link
+    # repeats -ffp-contract=off and -fno-strict-aliasing; xxHash without its aliasing-unsafe default under LTO.
+    option(USF4_SWITCH_LTO "Link-time optimisation of the game code and the app (Switch)" ON)
+    set(USF4_SWITCH_LTO_JOBS "4" CACHE STRING "Parallel LTRANS jobs of the Switch LTO link")
+    target_compile_definitions(usf4 PRIVATE XXH_FORCE_MEMORY_ACCESS=0)
+    if(USF4_SWITCH_LTO)
+        foreach(target usf4_recomp usf4)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE -flto -fno-fat-lto-objects -fipa-pta)
+            endif()
+        endforeach()
+        target_link_options(usf4 PRIVATE -flto=${USF4_SWITCH_LTO_JOBS} -flto-partition=balanced -fipa-pta
+                            -ffp-contract=off -fno-strict-aliasing)
+        message(STATUS "usf4: Switch LTO on (${USF4_SWITCH_LTO_JOBS} LTRANS jobs)")
+    endif()
+    # Line tables for the app's own code, so console crash and profile addresses map to source lines (addr2line on
+    # the archived ELF); DWARF 4, as sa2-nx found DWARF 5 mixed up files under LTO. The game code stays without.
+    target_compile_options(usf4 PRIVATE -g1 -gdwarf-4)
+    target_link_options(usf4 PRIVATE -g1 -gdwarf-4)
+
+    # Fixed settings compiled in, and the player's usf4.toml written next to the NRO when missing.
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch_defaults.toml" USF4_BUILTIN_CONFIG)
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch.toml" USF4_PLAYER_CONFIG)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                 "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch_defaults.toml" "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch.toml")
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/usf4_builtin_config.h.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/builtin_config/usf4_builtin_config.h" @ONLY)
+    target_include_directories(usf4 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/builtin_config")
+    target_compile_definitions(usf4 PRIVATE USF4_BUILTIN_CONFIG=1)
+
+    # The homebrew menu's entry (app/icon.jpg: a plain 256x256 JPEG made for this port, no game artwork).
+    rexglue_switch_add_nro(usf4
+        NAME "Ultra Street Fighter IV"
+        AUTHOR "usf4-nx"
+        VERSION "0.1.0"
+        ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
 endif()

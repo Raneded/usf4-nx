@@ -288,3 +288,32 @@ come with 70-118 ms frames: pipelines compiled the first time a state is seen, w
 (`cache/`) removes on later runs). GPU time per 10 s, heaviest passes: the scene (VS249/PS168) 1.56 s, VS777/PS641
 0.74 s. Open: the jungle foliage dither (seen with `-Emulated`; the native renderer draws alpha-to-coverage as an
 alpha test at 0.5, `banjo_native_alpha_to_mask_test`), the white speckles seen once on the bay stage here.
+
+## Stage 5: the first Switch build (2026-10-11)
+
+Toolchain: devkitPro's Docker image `devkitpro/devkita64` (devkitA64 r29.2, GCC 15.2, binutils 2.45.1, libnx 4.12.0;
+devkitpro.org's installer is behind a Cloudflare check that blocks scripted downloads). The build runs in the
+container with the repository mounted at the same path; glslangValidator is built in the container
+(`out/glslang-dkp`), the host's needs a newer glibc. First build without LTO (`-DUSF4_SWITCH_LTO=OFF`): 759 steps.
+
+The Mesa driver:
+- **Mesa 26.2.4** (`mesa-26.2.4-switch-unified-horizon-sdk.zip`, from the user): **unusable as shipped**. Its Rust
+  parts (NAK, NIL) reference the `core` and `alloc` crates (hash `R2NHd66MWo`), but no archive of the package
+  contains them (libvulkan.a bundles compiler_builtins, nak_rs and nil only; libnak_rs.a / libnil.a have std,
+  panic_unwind, ... but no core/alloc): 4,944 undefined references at the link.
+- **Mesa 26.2.2** (nfsmw-nx's build, the one sa2-nx shipped; it was in `/opt/devkitpro/portlibs/switch`): complete
+  (nothing referenced is missing from the archive), but devkitA64's ld still left 4,939 Rust runtime symbols
+  undefined, even for a program that only calls vkCreateInstance: the archive holds two Rust static libraries with
+  their own runtime copies, 564 member names twice, and ld does not pull those members through the index. Passing the
+  objects explicitly resolved them. `tools/switch/repack_archive.py` repacks the members in order under unique names
+  with a fresh index (no object changed): the test program and the game link. The build uses
+  `out/tools/mesa-26.2.2-repacked/switch` (the 26.2.2 SDK with the repacked libvulkan.a).
+
+`tools/check_switch_build.py --elf out/nx/usf4 --nro out/nx/usf4.nro --sdk-vulkan ...`: `_start` at 0, Mesa 26.2.2 in
+the NRO, 0 vector fused multiply-adds; "flavour" fails by design (classic codegen); three branch-to-self loops, all the
+game's own: `sub_8229CCD8` (guest `b .` at 0x8229CCF8) and `sub_822D2A38` (guest `b .` at 0x822D2ADC) are halts,
+`sub_82245530` is a list search whose "not found" path loops on registers only (the guest spins there too).
+
+Settings compiled in: `app/usf4_switch_defaults.toml` (native renderer, logging on for the first tests, no asset-pack
+build: the game folder is read directly, a 7.7 GB pack would not fit FAT32); the player's `usf4.toml` from
+`app/usf4_switch.toml`. Package: `tools/linux/package_switch.sh` -> `out/nx/usf4-nx-switch.zip` (NRO 68 MB + shaders).
