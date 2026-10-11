@@ -35,6 +35,9 @@ xvfb=$!
 trap 'kill $xvfb 2>/dev/null' EXIT
 for _ in $(seq 50); do [ -e "/tmp/.X11-unix/X$disp" ] && break; sleep 0.1; done
 
+# The guest memory is a /dev/shm/xenia_memory_* file of ~4.8 GB; a run that is killed leaves it behind and a full
+# /dev/shm makes the next start die with SIGBUS. Note the ones that exist now and remove this run's afterwards.
+shm_before="$(ls /dev/shm 2>/dev/null | grep '^xenia_memory_' || true)"
 cd "$root/out/pc"
 snap_args=()
 [ -n "$shots" ] && snap_args=(--usf4_snapshot_s="$(echo $shots | tr ' ' ',')")
@@ -54,6 +57,9 @@ if ! wait $game 2>/dev/null; then status=$?; fi
 [ $(( $(date +%s) - start )) -lt "$seconds" ] && echo "== the game exited by itself after $(( $(date +%s) - start ))s, status $status"
 for f in "$root"/out/pc/captures/snap_*s.ppm; do
   [ -e "$f" ] && ffmpeg -loglevel error -y -i "$f" "${f%.ppm}.png" && rm -f "$f"
+done
+for f in $(ls /dev/shm 2>/dev/null | grep '^xenia_memory_' || true); do
+  echo "$shm_before" | grep -qx "$f" || rm -f "/dev/shm/$f"
 done
 echo "== end of $log"
 tail -n 40 "$log" 2>/dev/null || tail -n 40 "$root/out/pc/stdout.log"

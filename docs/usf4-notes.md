@@ -334,3 +334,30 @@ and colour/depth aliasing in EDRAM make the mode-4 transfers far heavier than SA
 0.2.0: LTO (6 LTRANS jobs), `sa2_gpu_marks_categories` and `switch_profile_stacks` on, to break the console's GPU
 and CPU time down. Checks: one more branch-to-self, `sub_822D43A0`: the guest halt of `sub_822D2A38` inlined into
 its caller by LTO.
+
+## 0.2.0 on the console, and what limits the fights (2026-10-11)
+
+LTO made a large difference: fights ~30 fps (28-36, up to 40), menus 60 (user's run with clocks between CPU
+1020-2703 MHz, GPU 460.8-1228.8 MHz, memory 2700). `sa2_render_height_* = 540` raised fights to ~37 fps.
+
+GPU time per 10 s of fighting (~290 frames), `sa2_gpu_marks_categories`: EDRAM 9-pass stencil depth imports 1.28 s,
+colour alias conversions 1.84 s, depth imports/exports 0.79 s, copies to textures 0.28 s, the scene itself 1.47 s:
+**~70 % of the GPU is EDRAM emulation**. CPU (`switch_profile_stacks`): ring thread 88 % (CopyVertices, memcpy,
+Fingerprint64: vertex uploads and their dedupe), main thread 69 %, mostly in Direct3D's waits (sub_821F54E0,
+sub_821F8FA8).
+
+The 9-pass imports are dominated by depth coming back from a 4x MSAA alias (pitch 280) to the 2x scene (pitch 560):
+`D508:280x720:mx1my1 -> 508:560x720` 156,600 tiles and `D0E0 -> 0E0` 55,680 per 10 s (83 %). Those are Direct3D
+Clears through the 4x alias (sa2-nx's notes, "How SA2 clears the screen"). The renderer redirects such clears into the
+tiles' owners, but declined USF4's: "also writes color (color 0: ...)". With the colour planner's reasons logged
+(`[usf4diag]`, first 12 of each): **owner unsupported**, the colour clear's tiles (colour base 000/4F8, 280x720 4x) are
+owned by a *depth* view (0E0 or 060, D24S8/D24FS8 4x or 1x), which the planner does not handle; **rect not
+tile-aligned**, clears along the predicated-tile seam (x 480-544, 544 not a multiple of 80) and thin strips (y 176-180).
+
+Next (not done): let the colour half clear into depth owners (the colour word as depth = word >> 8, stencil = word &
+0xFF, float24 for D24FS8), and handle seam/strip partial tiles. Caution: in these clears the colour surface (base 000,
+630 tiles) and the depth surface (base 0E0) overlap in EDRAM, so the order of the two writes in the overlapped tiles
+must match the hardware's; verify against the emulated GPU frame by frame before turning it on.
+
+Test harness: `/dev/shm` filled up with `xenia_memory_*` files (4.8 GB each) left by killed runs, and the next start
+died with SIGBUS; `tools/linux/boot_test.sh` now removes the ones its run created.

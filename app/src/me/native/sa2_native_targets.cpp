@@ -4829,7 +4829,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     // side effect, and committed after the depth half: both or neither.
     ColorClearEDRAM4 color_clear;
     if (p.edram_overwrite_slots == 3) {
-      if (!PlanClearColor0EDRAM4(p, color_clear)) return no("also writes color (color 0 not redirectable)");
+      if (!PlanClearColor0EDRAM4(p, color_clear)) {
+        // usf4-nx: the reason in the report (static strings, so the key stays a pointer-free literal set).
+        static std::unordered_map<std::string, std::string> keys;
+        auto& k = keys[color0_plan_reason_];
+        if (k.empty()) k = std::string("also writes color (color 0: ") + color0_plan_reason_ + ")";
+        return no(k.c_str());
+      }
     } else if (p.edram_overwrite_slots != 1) {
       return no("also writes color");
     }
@@ -5167,30 +5173,40 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     Image* drawn = nullptr;
   };
   bool PlanClearColor0EDRAM4(const SubmissionDraw& p, ColorClearEDRAM4& plan) {
+    // usf4-nx: why the color half was declined, for the depth clear redirect's report.
+    const auto plan_no = [&](const char* reason) { color0_plan_reason_ = reason; return false; };
+    color0_plan_reason_ = "";
     if (!REXCVAR_GET(sa2_native_edram4_clear_color0) || !p.edram_overwrite_color0 || !p.edram_overwrite_rect)
-      return false;
+      return plan_no("off or no constant color/rect");
     const uint32_t* r = p.registers;
     const uint32_t info = r[gr::XE_GPU_REG_RB_COLOR_INFO];
-    if (((info >> 16) & 0xF) != 0) return false;  // k_8_8_8_8 only (no gamma, no float formats)
+    if (((info >> 16) & 0xF) != 0) return plan_no("not k_8_8_8_8");  // k_8_8_8_8 only (no gamma, no float formats)
     // The bytes the ROP stores: round to nearest of the clamped value. A value within float rounding of a tie
     // could round either way on the GPU: declined.
     for (uint32_t c = 0; c < 4; ++c) {
       const float v = (*p.edram_overwrite_color0)[c];
-      if (std::isnan(v)) return false;
+      if (std::isnan(v)) return plan_no("color NaN");
       const double f = double(std::clamp(v, 0.0f, 1.0f)) * 255.0;
-      if (std::abs(f - std::floor(f) - 0.5) < 1.0 / 1024.0) return false;
+      if (std::abs(f - std::floor(f) - 0.5) < 1.0 / 1024.0) return plan_no("color on a rounding tie");
       plan.value.float32[c] = float(std::lround(f)) / 255.0f;
     }
-    if (!Record()) return false;
+    if (!Record()) return plan_no("no record");
     Image* drawn = GetTarget(info & 0xFFF, 0, r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF);
     if (!drawn || drawn->edram_depth || drawn->edram_64bpp || drawn->guest_width || drawn->guest_height ||
-        drawn->raster_grid_x || drawn->format != VK_FORMAT_R8G8B8A8_UNORM) return false;
+        drawn->raster_grid_x || drawn->format != VK_FORMAT_R8G8B8A8_UNORM) return plan_no("drawn view unsupported");
     const auto& o = *p.edram_overwrite_rect;
     const uint32_t tw = 80u >> drawn->edram_msaa_x, th = 16u >> drawn->edram_msaa_y;
     if (o[0] < 0 || o[1] < 0 || o[0] % tw || o[1] % th || o[2] % tw || o[3] % th || o[2] <= o[0] ||
-        o[3] <= o[1] || uint32_t(o[2]) > drawn->width || uint32_t(o[3]) > drawn->height) return false;
+        o[3] <= o[1] || uint32_t(o[2]) > drawn->width || uint32_t(o[3]) > drawn->height) {
+      static int logged = 0;  // usf4-nx diagnostic
+      if (logged < 12 && ++logged)
+        REXLOG_INFO("[usf4diag] color0 rect {},{}-{},{} tile {}x{} drawn {}x{} base {:03X} msaa {}/{} pitch {}", o[0], o[1],
+                    o[2], o[3], tw, th, drawn->width, drawn->height, drawn->edram_base, drawn->edram_msaa_x,
+                    drawn->edram_msaa_y, r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF);
+      return plan_no("rect not tile-aligned or outside");
+    }
     const uint32_t pitch_tiles = PitchTilesEDRAM(*drawn);
-    if (!pitch_tiles) return false;
+    if (!pitch_tiles) return plan_no("no pitch");
     for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
       for (uint32_t tx = uint32_t(o[0]) / tw; tx < uint32_t(o[2]) / tw;) {
         const uint32_t local = ty * pitch_tiles + tx;
@@ -5199,10 +5215,22 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (!w || w == drawn || w->image == drawn->image || w->edram_depth || w->edram_64bpp ||
             w->format != VK_FORMAT_R8G8B8A8_UNORM || w->edram_format != 0 || !w->prepared || w->invalid_content ||
             w->guest_width || w->guest_height || w->raster_grid_x ||
-            !SamplesSupported(*w)) return false;
+            !SamplesSupported(*w)) {
+          static int logged = 0;  // usf4-nx diagnostic
+          if (logged < 12 && ++logged)
+            REXLOG_INFO("[usf4diag] color0 owner: none {} self {} depth {} 64bpp {} fmt {} edramfmt {} prepared {} "
+                        "invalid {} guest {}x{} grid {} samples_ok {} | owner base {:03X} {}x{} msaa {}/{} | drawn base "
+                        "{:03X} {}x{} msaa {}/{}", !w, w == drawn, w ? w->edram_depth : 0, w ? w->edram_64bpp : 0,
+                        w ? int(w->format) : -1, w ? w->edram_format : 0, w ? w->prepared : 0,
+                        w ? w->invalid_content : 0, w ? w->guest_width : 0, w ? w->guest_height : 0,
+                        w ? w->raster_grid_x : 0, w ? SamplesSupported(*w) : 0, w ? w->edram_base : 0,
+                        w ? w->width : 0, w ? w->height : 0, w ? w->edram_msaa_x : 0, w ? w->edram_msaa_y : 0,
+                        drawn->edram_base, drawn->width, drawn->height, drawn->edram_msaa_x, drawn->edram_msaa_y);
+          return plan_no("owner unsupported");
+        }
         const uint32_t wp = PitchTilesEDRAM(*w);
         const uint32_t ww = 80u >> w->edram_msaa_x, wh = 16u >> w->edram_msaa_y;
-        if (!wp || w->width % ww) return false;
+        if (!wp || w->width % ww) return plan_no("owner width not tile-aligned");
         uint32_t count = 1;
         while (tx + count < uint32_t(o[2]) / tw && (owner.tile_local % wp) + count < wp) {
           const auto next = owners_tiles_edram4_[(drawn->edram_base + local + count) & 2047u];
@@ -5210,14 +5238,16 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
           ++count;
         }
         const uint32_t x = (owner.tile_local % wp) * ww, y = (owner.tile_local / wp) * wh, width = ww * count;
-        if (x >= w->width || y >= w->height || width > w->width - x || wh > w->height - y) return false;
+        if (x >= w->width || y >= w->height || width > w->width - x || wh > w->height - y) return plan_no("owner run outside the owner");
         plan.runs.push_back({w, local, count, {{int32_t(x), int32_t(y)}, {width, wh}}});
         tx += count;
       }
     }
     plan.drawn = drawn;
+    if (plan.runs.empty()) color0_plan_reason_ = "no runs";
     return !plan.runs.empty();
   }
+  const char* color0_plan_reason_ = "";
   bool CommitClearColor0EDRAM4(const ColorClearEDRAM4& plan) {
     // Runs of consecutive tile rows of one owner that line up form one rectangle: a full-screen clear is one clear.
     struct Area {
