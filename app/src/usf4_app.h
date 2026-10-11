@@ -15,6 +15,7 @@
 
 #include "cpu/sa2_enhancements.h"
 #include "me/me_native_system.h"
+#include "sa2_capture.h"
 #include "usf4_script_input.h"
 #include "usf4_snapshot.h"
 
@@ -101,6 +102,13 @@ class Usf4App : public rex::ReXApp {
 
   // Test snapshots of the game image (usf4_snapshot_s), read from the presenter's guest output.
   void OnPostSetup() override {
+    // Short video recordings of the game image (sa2_video_s; sa2-nx's recorder, lockstep with vblank_per_swap): raw
+    // frames + a per-frame XXH3 of the full-resolution image, to compare two runs frame for frame.
+    sa2::capture::Start([this]() -> rex::ui::Presenter* {
+      const auto* rt = runtime();
+      const auto* graphics = rt ? rt->graphics_system() : nullptr;
+      return graphics ? graphics->presenter() : nullptr;
+    });
     usf4::snapshot::Start([this]() -> rex::ui::Presenter* {
       const auto* rt = runtime();
       const auto* graphics = rt ? rt->graphics_system() : nullptr;
@@ -108,7 +116,10 @@ class Usf4App : public rex::ReXApp {
     });
   }
 
-  void OnShutdown() override { usf4::snapshot::Stop(); }
+  void OnShutdown() override {
+    sa2::capture::Stop();
+    usf4::snapshot::Stop();
+  }
 
   // Analysis aid: with USF4_DUMP_IMAGE=<file>, write the loaded guest image (image_base..image_base+image_size) so
   // code pointers stored in data can be scanned for (tools/pointer_scan.py). Does nothing unless the variable is set.

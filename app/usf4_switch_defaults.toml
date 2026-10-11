@@ -29,3 +29,7 @@ asset_pack_build = false
 # samples of the game threads in logs/rex/rex_profile.log. Both cost a little; off again for a release.
 sa2_gpu_marks_categories = true
 switch_profile_stacks = true
+
+# 0.3.0: Direct3D's Clear through the 4x alias clears straight into the depth views that own its tiles
+# (docs/usf4-notes.md, "Clears into depth owners"): -81 % of the 9-pass depth imports in a fight.
+usf4_edram4_clear_into_depth = true

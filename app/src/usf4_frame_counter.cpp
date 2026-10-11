@@ -11,6 +11,8 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 
+#include "sa2_capture.h"
+
 REXCVAR_DEFINE_BOOL(usf4_fps_log, true, "USF4", "Log the game's presented frames per second every 5 s");
 
 std::atomic<uint64_t> g_usf4_game_frames{0};
@@ -42,7 +44,9 @@ void Report() {
 
 extern "C" REX_FUNC(__imp__sub_821FAA00);
 REX_HOOK_RAW(sub_821FAA00) {
+  sa2::capture::BeforeFlip();  // sa2_video_lockstep: the recorder takes every frame (sa2-nx's recorder)
   __imp__sub_821FAA00(ctx, base);
   g_usf4_game_frames.fetch_add(1, std::memory_order_relaxed);
+  g_sa2_game_frames.fetch_add(1, std::memory_order_relaxed);
   if (REXCVAR_GET(usf4_fps_log)) Report();
 }

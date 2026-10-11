@@ -17,6 +17,7 @@
 #include "usf4_script_input.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -31,9 +32,14 @@
 #include <rex/input/input_system.h>
 #include <rex/logging.h>
 
+extern std::atomic<uint64_t> g_usf4_game_frames;  // src/usf4_frame_counter.cpp
+
 REXCVAR_DEFINE_STRING(usf4_input_script, "", "USF4",
                       "Scripted gamepad events for tests, ';'-separated: \"<seconds> <BUTTON[+BUTTON]> [hold]\" "
                       "(e.g. \"20 START;25 A\"); empty = off");
+REXCVAR_DEFINE_BOOL(usf4_input_script_frames, false, "USF4",
+                    "Scripted gamepad times count game frames / 60 (presented frames, src/usf4_frame_counter.cpp) "
+                    "instead of wall-clock seconds: with vblank_per_swap two runs press at the same frames");
 REXCVAR_DEFINE_STRING(usf4_input_script_file, "", "USF4",
                       "File with scripted gamepad events, one per line (same format as usf4_input_script)");
 
@@ -129,8 +135,9 @@ class ScriptInputDriver final : public rex::input::InputDriver {
   X_RESULT GetDeviceState(DeviceId id, rex::input::X_INPUT_STATE* out_state) override {
     if (id != kScriptDevice) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (!out_state) return X_ERROR_SUCCESS;
-    const double now =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+    const double now = REXCVAR_GET(usf4_input_script_frames)
+        ? double(g_usf4_game_frames.load(std::memory_order_relaxed)) / 60.0
+        : std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
     uint16_t buttons = 0;
     uint8_t lt = 0, rt = 0;
     int16_t lx = 0, ly = 0, rx = 0, ry = 0;

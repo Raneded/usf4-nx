@@ -32,6 +32,8 @@ set(USF4_SOURCES
     src/usf4_script_input.cpp
     # Presented frames per second in the log (hook on the game's Direct3D swap, sub_821FAA00).
     src/usf4_frame_counter.cpp
+    # Recordings of the game image for frame-by-frame comparisons (sa2-nx's recorder: sa2_video_s, lockstep).
+    src/sa2_capture.cpp
     # Stage 4: the native renderer (src/me, sa2-nx's copy of masseffect-nx's PM4-ring Vulkan renderer as adapted by
     # banjo-nx; files kept as in sa2-nx so its fixes can be taken over). It replaces the emulated Xenos GPU with
     # sa2_renderer_native = true; off by default until it draws USF4 right.
@@ -201,6 +203,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "usf4-nx"
-        VERSION "0.2.0"
+        VERSION "0.3.0"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
 endif()

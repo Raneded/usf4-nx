@@ -361,3 +361,22 @@ must match the hardware's; verify against the emulated GPU frame by frame before
 
 Test harness: `/dev/shm` filled up with `xenia_memory_*` files (4.8 GB each) left by killed runs, and the next start
 died with SIGBUS; `tools/linux/boot_test.sh` now removes the ones its run created.
+
+## Clears into depth owners (usf4_edram4_clear_into_depth, 2026-10-12)
+
+`PlanClearColor0EDRAM4` now accepts tiles owned by a D24S8 / D24FS8 depth view: the clear's 32-bit EDRAM word
+(byte c = colour channel c, as the depth redirect's colour owners assume) is that view's depth and stencil (depth =
+word >> 8 as unorm24 or 20e4, stencil = word & 0xFF), cleared in place with `ClearDepthInPass`, with the same
+bookkeeping as the depth redirect's in-place clears (`edram4_bits_stencil`, `StencilRealEDRAM4`, tile versions).
+The colour half is committed after the depth half, as before.
+
+Verification (the guide's A/B, on PC): lockstep runs (`vblank_per_swap`, the training script on the game-frame clock
+`usf4_input_script_frames`, sa2-nx's recorder `sa2_video_s`/`sa2_video_frame`; `tools/linux/lockstep_run.sh`).
+USF4 is not bit-exact between two identical runs (the fighters' animation phase differs: base1 vs base2 mean MAD
+0.39, median 0.24, `tools/compare_raw.py --follow`), so the check is "only the fighters differ": base1 vs clr1 mean
+MAD 0.34, median 0.20, the worst pairs differ on the fighters only, background and HUD identical. Tested on the
+training stage only.
+
+Effect per report (PC): 9-pass depth import tiles 76,110 -> 14,688 (-81 %); the 4x-alias imports `D0E0` (16,512)
+and `D508` (46,440) are gone; the "owner unsupported" declines are gone. Still declined: "rect not tile-aligned"
+(the predicated-tile seam at x 544 and thin strips), the next item.

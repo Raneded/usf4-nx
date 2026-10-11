@@ -387,6 +387,12 @@ REXCVAR_DEFINE_BOOL(sa2_native_precise_marks, true, "SA2 renderer",
 #else
 #define SA2_GPU_MARKS_CATEGORIES_DEFAULT true
 #endif
+// usf4-nx: Direct3D's Clear through a 4x alias writes its color word into EDRAM tiles that a depth view owns (USF4:
+// color base 000/4F8 over the depth views 0E0/060). Without this the color half is declined and the whole clear is
+// drawn in the alias, and the depth comes back through 9-pass imports (83 % of them in a fight).
+REXCVAR_DEFINE_BOOL(usf4_edram4_clear_into_depth, false, "USF4",
+                    "EDRAM mode 4: a redirected color-0 clear whose tiles a D24S8/D24FS8 depth view owns clears that "
+                    "view with the same 32-bit word read as depth/stencil (depth = word >> 8, stencil = word & 0xFF)");
 REXCVAR_DEFINE_BOOL(sa2_gpu_marks_categories, SA2_GPU_MARKS_CATEGORIES_DEFAULT, "SA2 renderer",
                     "Write a GPU timestamp at every category change (per-category GPU report). false: only the "
                     "first and last timestamp per submission (no per-category breakdown, fewer GPU flushes)")
@@ -5167,11 +5173,26 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       Image* owner;
       uint32_t first_local, count;
       VkRect2D area;
+      bool depth_owner = false;  // usf4-nx: the owner is a depth view (usf4_edram4_clear_into_depth)
+      uint32_t owner_local = 0;  // the owner's own index of the run's first tile
     };
     std::vector<Run> runs;
     VkClearColorValue value{};
     Image* drawn = nullptr;
+    uint32_t word = 0;  // usf4-nx: the 32-bit EDRAM word the clear writes (byte c = channel c)
   };
+  // usf4-nx: ReXGlue xenos Float20e4To32 (the inverse of WordFloat24EDRAM4).
+  static float FromFloat24EDRAM4(uint32_t f24) {
+    f24 &= 0xFFFFFFu;
+    if (!f24) return 0.0f;
+    uint32_t mantissa = f24 & 0xFFFFFu, exponent = f24 >> 20;
+    if (!exponent) {
+      const uint32_t shift = 20u - uint32_t(std::bit_width(mantissa) - 1);
+      exponent = 1u - shift;
+      mantissa = (mantissa << shift) & 0xFFFFFu;
+    }
+    return std::bit_cast<float>(((exponent + 112u) << 23) | (mantissa << 3));
+  }
   bool PlanClearColor0EDRAM4(const SubmissionDraw& p, ColorClearEDRAM4& plan) {
     // usf4-nx: why the color half was declined, for the depth clear redirect's report.
     const auto plan_no = [&](const char* reason) { color0_plan_reason_ = reason; return false; };
@@ -5189,6 +5210,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       const double f = double(std::clamp(v, 0.0f, 1.0f)) * 255.0;
       if (std::abs(f - std::floor(f) - 0.5) < 1.0 / 1024.0) return plan_no("color on a rounding tie");
       plan.value.float32[c] = float(std::lround(f)) / 255.0f;
+      plan.word |= uint32_t(std::lround(f)) << (8 * c);
     }
     if (!Record()) return plan_no("no record");
     Image* drawn = GetTarget(info & 0xFFF, 0, r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF);
@@ -5212,10 +5234,14 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         const uint32_t local = ty * pitch_tiles + tx;
         const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & 2047u];
         Image* w = owner.image;
-        if (!w || w == drawn || w->image == drawn->image || w->edram_depth || w->edram_64bpp ||
+        const bool depth_owner = w && w != drawn && w->image != drawn->image && w->edram_depth &&
+            REXCVAR_GET(usf4_edram4_clear_into_depth) && !w->edram_64bpp &&
+            (w->edram_format == 0 || w->edram_format == 1) && w->prepared && !w->invalid_content &&
+            !w->guest_width && !w->guest_height && !w->raster_grid_x && SamplesSupported(*w);
+        if (!depth_owner && (!w || w == drawn || w->image == drawn->image || w->edram_depth || w->edram_64bpp ||
             w->format != VK_FORMAT_R8G8B8A8_UNORM || w->edram_format != 0 || !w->prepared || w->invalid_content ||
             w->guest_width || w->guest_height || w->raster_grid_x ||
-            !SamplesSupported(*w)) {
+            !SamplesSupported(*w))) {
           static int logged = 0;  // usf4-nx diagnostic
           if (logged < 12 && ++logged)
             REXLOG_INFO("[usf4diag] color0 owner: none {} self {} depth {} 64bpp {} fmt {} edramfmt {} prepared {} "
@@ -5239,7 +5265,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         }
         const uint32_t x = (owner.tile_local % wp) * ww, y = (owner.tile_local / wp) * wh, width = ww * count;
         if (x >= w->width || y >= w->height || width > w->width - x || wh > w->height - y) return plan_no("owner run outside the owner");
-        plan.runs.push_back({w, local, count, {{int32_t(x), int32_t(y)}, {width, wh}}});
+        plan.runs.push_back({w, local, count, {{int32_t(x), int32_t(y)}, {width, wh}}, depth_owner,
+                             uint32_t(owner.tile_local)});
         tx += count;
       }
     }
@@ -5256,6 +5283,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     };
     std::vector<Area> areas;
     for (const auto& run : plan.runs) {
+      // (A depth owner's runs merge the same way: one owner, one value.)
       if (!areas.empty() && areas.back().w == run.owner && areas.back().rect.offset.x == run.area.offset.x &&
           areas.back().rect.extent.width == run.area.extent.width &&
           areas.back().rect.offset.y + int32_t(areas.back().rect.extent.height) == run.area.offset.y) {
@@ -5272,18 +5300,34 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       ForgetClear(*a.w);
     }
     BarrierClearEDRAM4();
-    for (const auto& a : areas)
+    const uint32_t stencil = plan.word & 0xFFu;
+    for (const auto& a : areas) {
+      if (a.w->edram_depth) {
+        // usf4-nx: the word the clear writes, read as the owner's depth/stencil (D24S8: unorm24; D24FS8: 20e4).
+        const uint32_t d24 = plan.word >> 8;
+        const float guest = a.w->edram_format == 0 ? float(double(d24) / 16777215.0) : FromFloat24EDRAM4(d24);
+        const float native = me::native::GuestDepthToNative(guest, a.w->depth_float24_half);
+        if (!draws_->ClearDepthInPass(commands_work_, *a.w, native, stencil, &a.rect)) return false;
+        continue;
+      }
       if (!draws_->ClearColorInPass(commands_work_, *a.w, plan.value, a.rect)) return false;
+    }
     BarrierClearEDRAM4();
     for (const auto& run : plan.runs) {
       for (uint32_t i = 0; i < run.count; ++i)
         owners_tiles_edram4_[(plan.drawn->edram_base + run.first_local + i) & 2047u].version = ++edram4_version_;
+      if (run.depth_owner) {  // both aspects written, as the depth redirect's in-place clears
+        run.owner->edram4_bits_stencil |= uint8_t(stencil);
+        StencilRealEDRAM4(*run.owner, run.owner_local, run.count);
+        usf4_color0_into_depth_tiles_ += run.count;
+      }
       edram4_redirected_color0_tiles_ += run.count;
     }
     edram4_redirected_color0_areas_ += areas.size();
     return true;
   }
   uint64_t edram4_redirected_color0_tiles_ = 0, edram4_redirected_color0_areas_ = 0;
+  uint64_t usf4_color0_into_depth_tiles_ = 0;  // usf4-nx: of those, tiles cleared into depth owners
   uint64_t edram4_redirected_merged_ = 0;  // clears the redirected depth clears issued after merging their regions
 
   // Mass Effect (every frame, main scene depth D000): a full-screen stencil-only D3D Clear (stencil ALWAYS /
@@ -9658,6 +9702,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       REXLOG_INFO("[native] EDRAM mode4 redirected clears: {} depth clears issued as {} merged clears; color 0 alias "
                   "clears into their 1x owners: {} tiles in {} clears", edram4_redirected_, edram4_redirected_merged_,
                   edram4_redirected_color0_tiles_, edram4_redirected_color0_areas_);
+    if (usf4_color0_into_depth_tiles_)
+      REXLOG_INFO("[native] EDRAM mode4 color 0 clears into depth owners (usf4_edram4_clear_into_depth): {} tiles",
+                  usf4_color0_into_depth_tiles_);
+    usf4_color0_into_depth_tiles_ = 0;
     edram4_redirected_color0_tiles_ = edram4_redirected_color0_areas_ = edram4_redirected_merged_ = 0;
     if (const uint64_t memo_total = edram4_memo_hits_ + edram4_memo_misses_ + edram4_memo_ineligible_) {
       REXLOG_INFO("[native] EDRAM draw memo (sa2_cpu_ring_edram_memo {}): {} draws prepared from the memo, {} by the "
