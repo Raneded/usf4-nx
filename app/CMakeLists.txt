@@ -1,0 +1,153 @@
+# Ultra Street Fighter IV (Xbox 360): static recompilation host application.
+#
+# The game code is not in this repository: run the code generator first (tools/codegen.sh), which writes generated/
+# from your own Default.xex together with the CMake glue (generated/rexglue.cmake, made by `rexglue codegen`).
+#
+# Stage 3, PC (Linux):
+#   cmake -S app -B out/pc -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang \
+#         -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2
+#   cmake --build out/pc
+
+cmake_minimum_required(VERSION 3.25)
+project(usf4 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# The SDK is built from source in this repository unless another tree is given.
+set(REXSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk" CACHE PATH "Path to the ReXGlue SDK source tree")
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/rexglue.cmake")
+    message(FATAL_ERROR "app/generated/rexglue.cmake is missing: run tools/codegen.sh first")
+endif()
+include(generated/rexglue.cmake)
+
+set(USF4_SOURCES
+    src/main.cpp
+    # Linux: logs fatal host signals the SDK does not report (illegal instruction, ...) with the executable offset.
+    src/usf4_crash_log.cpp
+    # Still snapshots of the game image for testing (cvar usf4_snapshot_s).
+    src/usf4_snapshot.cpp
+    # Scripted gamepad on player 1 for automated tests (cvars usf4_input_script, usf4_input_script_file).
+    src/usf4_script_input.cpp
+    # Presented frames per second in the log (hook on the game's Direct3D swap, sub_821FAA00).
+    src/usf4_frame_counter.cpp
+    # Stage 4: the native renderer (src/me, sa2-nx's copy of masseffect-nx's PM4-ring Vulkan renderer as adapted by
+    # banjo-nx; files kept as in sa2-nx so its fixes can be taken over). It replaces the emulated Xenos GPU with
+    # sa2_renderer_native = true; off by default until it draws USF4 right.
+    src/me/me_native_system.cpp
+    src/me/me_ring_wait.cpp
+    src/me/me_renderdoc.cpp
+    src/me/native/sa2_native_draws.cpp
+    src/me/native/sa2_deferred_recording.cpp
+    src/me/native/sa2_native_targets.cpp
+    src/me/native/sa2_native_shaders.cpp
+    src/me/native/sa2_native_textures_pool.cpp
+    src/me/native/sa2_shader_library.cpp
+    src/me/native/sa2_native_glue.cpp
+    # USF4's Direct3D addresses (shader load, Draw*) and the shader container dump (usf4_dump_shaders).
+    src/me/usf4_me_hooks.cpp
+    # The SA2-only parts of the renderer glue that are not ported (native Direct3D layer, census): off.
+    src/me/usf4_api_stubs.cpp
+    # Render resolution per console mode (docked / handheld) and MSAA: sa2_render_height_*, sa2_msaa.
+    src/me/sa2_render_mode.cpp
+    # Switchable enhancements (sa2-nx docs/enhancements.md): masters sa2_cpu_enhancements / sa2_noncpu_enhancements.
+    src/cpu/sa2_enhancements.cpp
+    src/cpu/sa2_gpu_boost.cpp
+)
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    # Switch profiler counters the native renderer calls (no-ops on PC).
+    list(APPEND USF4_SOURCES src/me/me_pc_stubs.cpp)
+    # Sampling CPU profiler for PC tests (from nfsmw-nx via banjo-nx and sa2-nx).
+    list(APPEND USF4_SOURCES src/profiler/sa2_cpu_profile_pc.cpp)
+endif()
+
+# Diagnostic builds only (temporary hooks generated under out/diag): extra sources, empty by default.
+set(USF4_EXTRA_SOURCES "" CACHE STRING "Extra source files for diagnostic builds (empty for normal builds)")
+if(USF4_EXTRA_SOURCES)
+    list(APPEND USF4_SOURCES ${USF4_EXTRA_SOURCES})
+endif()
+
+if(WIN32)
+    add_executable(usf4 WIN32 ${USF4_SOURCES})
+else()
+    add_executable(usf4 ${USF4_SOURCES})
+endif()
+
+# The codegen flavour names the build in the first "[enh]" log line (sa2-nx); USF4 uses the classic codegen.
+set_source_files_properties(src/cpu/sa2_enhancements.cpp PROPERTIES COMPILE_DEFINITIONS "SA2_BUILD_FLAVOR=\"classic codegen\"")
+
+# Link the SDK. Stage 3 draws with ReXGlue's Xenos GPU emulation; the native renderer replaces it in stage 4.
+rexglue_setup_target(usf4 GPU_PLUGINS xenos)
+
+# SPIR-V initializers of the native renderer's EDRAM transfer / utility shaders (src/me/native/shaders), compiled
+# on the host with glslangValidator (built from the SDK's glslang into out/glslang: cmake -S sdk/thirdparty/glslang -B out/glslang, target glslangValidator). The Switch build
+# uses the same host tool: SPIR-V is platform independent.
+set(SA2_GLSLANG_VALIDATOR "${CMAKE_CURRENT_SOURCE_DIR}/../out/glslang/StandAlone/glslangValidator${CMAKE_EXECUTABLE_SUFFIX}"
+    CACHE FILEPATH "Host glslangValidator")
+set(SA2_GENERATED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders")
+set(SA2_EDRAM_SHADER_INCLUDES)
+foreach(_shader sa2_edram_7e3_to_rgba8 sa2_edram_rgba8_to_7e3 sa2_edram_16f_to_16f me_resolve_exp_bias me_edram_depth_to_rgba8 me_edram_depth_to_16f me_edram_import me_edram_color_to_depth me_edram_depth_to_depth me_edram_depth_to_stencil me_edram_color_to_stencil me_edram_depth_to_depth_msaa2 me_edram_depth_msaa2_to_depth_1x me_edram_depth_to_stencil_msaa2 me_edram_depth_msaa2_to_stencil_1x me_edram_raw64_to_rgba8 me_edram_rgba8_to_raw64 me_edram_raw64_to_16f me_edram_16f_to_raw64 me_edram_raw64_to_raw64 me_edram_depth_to_raw64 me_edram_raw64_to_depth me_depth_resolve_guestspace me_depth_resolve_guestspace_msaa2 me_edram_stencil_to_buffer me_edram_stencil_msaa2_to_buffer me_edram_color_stencil_to_buffer me_edram_color_to_color me_edram_r64_to_r64 sa2_resolve_copy sa2_depth_resolve_ms)
+    set(_extension comp)
+    if(_shader STREQUAL "me_edram_import")
+        set(_extension vert)
+    elseif(_shader MATCHES "^me_edram_(color_to_depth|depth_to_depth|depth_to_stencil|color_to_stencil|depth_to_depth_msaa2|depth_msaa2_to_depth_1x|depth_to_stencil_msaa2|depth_msaa2_to_stencil_1x|raw64_to_depth|color_to_color|r64_to_r64)$" OR _shader STREQUAL "sa2_resolve_copy" OR
+           _shader STREQUAL "sa2_depth_resolve_ms")
+        set(_extension frag)
+    endif()
+    set(_source "${CMAKE_CURRENT_SOURCE_DIR}/src/me/native/shaders/${_shader}.${_extension}")
+    set(_output "${SA2_GENERATED_SHADER_DIR}/${_shader}.inc")
+    set(_target_flags)
+    if(_shader MATCHES "^me_edram_(stencil_to_buffer|color_stencil_to_buffer|stencil_msaa2_to_buffer|depth_to_depth_msaa2|depth_msaa2_to_depth_1x|depth_to_stencil_msaa2|depth_msaa2_to_stencil_1x)$" OR _shader STREQUAL "me_depth_resolve_guestspace_msaa2")
+        set(_target_flags --target-env vulkan1.2)
+        set(_output "${SA2_GENERATED_SHADER_DIR}/${_shader}_generated.inc")
+    endif()
+    add_custom_command(OUTPUT "${_output}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SA2_GENERATED_SHADER_DIR}"
+        COMMAND "${SA2_GLSLANG_VALIDATOR}" -V ${_target_flags} -x -o "${_output}" "${_source}"
+        DEPENDS "${_source}" VERBATIM)
+    list(APPEND SA2_EDRAM_SHADER_INCLUDES "${_output}")
+endforeach()
+add_custom_target(sa2_edram_shaders DEPENDS ${SA2_EDRAM_SHADER_INCLUDES})
+add_dependencies(usf4 sa2_edram_shaders)
+target_include_directories(usf4 PRIVATE
+    "${SA2_GENERATED_SHADER_DIR}"
+    src
+    src/me
+    src/me/native
+    src/me/native/shaders
+    "${REXSDK_DIR}/src/core"
+    # Precompiled SPIR-V of the SDK presenter (vulkan_spirv/guest_output_*): the renderer draws into its output.
+    "${REXSDK_DIR}/src/ui/shaders")
+
+# CPU-only SDK sources the native renderer reuses (draw-extent estimation, shader microcode interpretation): the
+# GPU plugin's private symbols cannot satisfy application-side use.
+target_sources(usf4 PRIVATE
+    "${REXSDK_DIR}/src/graphics/register_file.cpp"
+    "${REXSDK_DIR}/src/graphics/format/ucode.cpp"
+    "${REXSDK_DIR}/src/graphics/pipeline/shader/interpreter.cpp")
+
+# The renderer includes xxhash.h and renderdoc_app.h directly; when the SDK is built from source they are private to
+# its libraries.
+foreach(_dep xxhash renderdoc)
+    if(TARGET ${_dep})
+        target_include_directories(usf4 PRIVATE $<TARGET_PROPERTY:${_dep},INTERFACE_INCLUDE_DIRECTORIES>)
+    endif()
+endforeach()
+
+# Settings template next to the executable, only when there is none yet (the copy there is the user's to edit).
+add_custom_command(TARGET usf4 POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/usf4.toml -DDST=$<TARGET_FILE_DIR:usf4>/usf4.toml
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_if_missing.cmake"
+    VERBATIM)
+
+# The SDK compiles itself with these (directory scope), but they do not reach the generated game code, which is
+# built in this directory. Fused multiply-add from separate PPC fmul/fadd drifts from the Xbox 360's results, and
+# strict aliasing is unsafe for recompiled code (as in sa2-nx).
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(target usf4 usf4_recomp)
+        if(TARGET ${target})
+            target_compile_options(${target} PRIVATE -ffp-contract=off -fno-strict-aliasing)
+        endif()
+    endforeach()
+endif()

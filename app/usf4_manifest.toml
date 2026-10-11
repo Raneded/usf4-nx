@@ -1,0 +1,26 @@
+# ReXGlue recompilation manifest for Ultra Street Fighter IV (Xbox 360 disc, title 434307FC, Default.xex).
+#
+# `rexglue codegen usf4_manifest.toml` (from app/). The project name sets the prefix of everything generated:
+# generated/default/usf4_{init,pch,funcs}.h, usf4_recomp.N.cpp, and the CMake target usf4_recomp.
+#
+# Default.xex: image base 0x82000000, entry point 0x82212AE0, image size 0x00DD0000, XEX version 0.0.0.5,
+# media id 7E76B603, XDK 2.0.21256 (D3D9LTCG, XAUDIO2, XMCORE, XMP, XONLINE). .pdata holds 26,003 function entries.
+
+[project]
+name = "usf4"
+sdk_version = "0.10.0"
+# Your own game files: the extracted disc (assets/game_root, made by tools/extract_iso.py). The disc names the
+# executable Default.xex (capital D). Nothing from the game is distributed with this project.
+game_root = "../assets/game_root"
+
+[entrypoint]
+file_path = "../assets/game_root/Default.xex"
+out_directory_path = "generated/default"
+
+#   overrides.toml       written by hand: code the automatic function discovery misses, each with its evidence
+includes = ["overrides.toml"]
+
+# Not translated (yet): Capture.xex (image base 0x88000000, module flags 0x9 = title DLL). It is the replay recorder
+# for the YouTube upload feature ("[EmCaptureXenon]", ASF writer, XAV encoder, "No youtube account linked ..."),
+# loaded by Default.xex from "UPDATE:\capture.xex" / game:. The service is gone; the plan is to keep the game from
+# loading it. Add it as a [[modules]] entry only if the first boot shows it loaded unconditionally.
