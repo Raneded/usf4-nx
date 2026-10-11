@@ -317,3 +317,20 @@ game's own: `sub_8229CCD8` (guest `b .` at 0x8229CCF8) and `sub_822D2A38` (guest
 Settings compiled in: `app/usf4_switch_defaults.toml` (native renderer, logging on for the first tests, no asset-pack
 build: the game folder is read directly, a 7.7 GB pack would not fit FAT32); the player's `usf4.toml` from
 `app/usf4_switch.toml`. Package: `tools/linux/package_switch.sh` -> `out/nx/usf4-nx-switch.zip` (NRO 68 MB + shaders).
+
+## First console test (0.1.0, 2026-10-11) and the profiling build (0.2.0)
+
+0.1.0 (no LTO) on the user's Switch (Atmosphère, Status Monitor, an overclock: memory 2700 MHz): boots, menus and
+fights with no visible glitch. Frame rate: boot 45-55, menus 39-52, **fights 10-24**, results ~59. A CPU overclock
+(1785 MHz) changed nothing: the fight is **GPU-bound** (Status Monitor: GPU 1228.8 MHz, load 96.6 %, 24 fps;
+renderer log: GPU busy ~6.05 s per 10 s in ~56 ms intervals, ~571 ms per second in fence waits; main thread 95 %,
+which on PC was mostly Direct3D's spin wait). App memory: 3,281 of 3,285 MB.
+
+Where the GPU time goes, from the PC's per-pass report (10 s at 60 fps, ~4.9 s in all): the scene tiles (pitch 560,
+"320" category: VS249/PS168 1.56 s, VS777/PS641 0.74 s) ~2.3 s; EDRAM emulation ~2.1 s (9-pass stencil depth imports
+0.63 s, colour aliases 0.69 s, depth imports 0.28 s, copies to textures 0.46 s). USF4's 2x MSAA, predicated tiling
+and colour/depth aliasing in EDRAM make the mode-4 transfers far heavier than SA2's.
+
+0.2.0: LTO (6 LTRANS jobs), `sa2_gpu_marks_categories` and `switch_profile_stacks` on, to break the console's GPU
+and CPU time down. Checks: one more branch-to-self, `sub_822D43A0`: the guest halt of `sub_822D2A38` inlined into
+its caller by LTO.

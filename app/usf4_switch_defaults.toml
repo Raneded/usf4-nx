@@ -24,3 +24,8 @@ sa2_noncpu_enhancements = true
 # data is already a few large archives (battle.eaf 2.8 GB, ...), so it would save few file opens. A pack made on the
 # PC (tools/build_asset_pack.py) is still used if present, on an exFAT card.
 asset_pack_build = false
+
+# Profiling build (0.2.0): GPU time per pass category in the log (EDRAM transfers, scene, copies, ...), and CPU stack
+# samples of the game threads in logs/rex/rex_profile.log. Both cost a little; off again for a release.
+sa2_gpu_marks_categories = true
+switch_profile_stacks = true
