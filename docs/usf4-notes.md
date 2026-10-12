@@ -380,3 +380,14 @@ training stage only.
 Effect per report (PC): 9-pass depth import tiles 76,110 -> 14,688 (-81 %); the 4x-alias imports `D0E0` (16,512)
 and `D508` (46,440) are gone; the "owner unsupported" declines are gone. Still declined: "rect not tile-aligned"
 (the predicated-tile seam at x 544 and thin strips), the next item.
+
+## Crash-safe pipeline cache file (2026-10-12)
+
+After a crash on the Switch (a screen recording), the next boot stayed on "Now Loading" until `cache/` was deleted:
+`cache/sa2_native_pipelines.bin` had the right size but damaged contents, and the reader only checked sizes. The file
+is now version 2 (`sa2_native_draws.cpp`, `kVersionFilePipelines`): its header carries an XXH3-64 of the list and the
+cache, and the writer flushes and `fsync`s (`_commit` on Windows) the `.tmp` file before renaming it. On a mismatch
+the reader logs `C6: pipeline file damaged (checksum): starting from scratch` and the session rebuilds the cache.
+Verified on Linux: a version-1 file is rejected ("from another version"), a new version-2 file is saved after the
+60 s timer, read back intact (6 pipelines), and the same file with one byte flipped in the middle is rejected.
+The first boot of 0.4.0 therefore starts with an empty cache, once.

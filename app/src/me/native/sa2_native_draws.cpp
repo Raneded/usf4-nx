@@ -132,6 +132,12 @@ REXCVAR_DEFINE_BOOL(sa2_native_sort_updates_texture, true, "SA2 renderer",
 #define XXH_FORCE_MEMORY_ACCESS 0
 #define XXH_INLINE_ALL
 #include <xxhash.h>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+#include <cstdio>
 #include "sa2_crc_fingerprint.h"
 
 // Only for RexSwitchSetCurrentThreadPriorityOk (texture bind thread). That header deliberately does not
@@ -1178,8 +1184,8 @@ constexpr VkDeviceSize kUploadSize = VkDeviceSize(64) << 20;
 // fills up, the work is submitted just as with the upload buffer.
 constexpr VkDeviceSize kSharedSize = VkDeviceSize(4) << 20;  // per work slot (there are three)
 // The pipeline cache and the prewarm list go in a single file in <NRO folder>/cache/ (nothing loose next to
-// the NRO, and a single pipelines .bin). Header "NFPC", version, list bytes and cache bytes (two uint32
-// and two uint64), then both parts: the list as is (its "NFPL" header and the records) and the
+// the NRO, and a single pipelines .bin). Header "NFPC", version, list bytes, cache bytes and checksum (two
+// uint32 and three uint64), then both parts: the list as is (its "NFPL" header and the records) and the
 // vkGetPipelineCacheData data.
 constexpr const char* kFolderCache = "cache";
 constexpr const char* kFilePipelines = "sa2_native_pipelines.bin";
@@ -1187,8 +1193,14 @@ constexpr const char* kFilePipelines = "sa2_native_pipelines.bin";
 // and deleted when the new one is written, so the renamed build keeps its prewarm list and Vulkan cache.
 constexpr const char* kFilePipelinesRenamed = "masseffect_native_pipelines.bin";
 constexpr uint32_t kMagicFilePipelines = 0x4350464Eu;  // "NFPC" in little-endian
-constexpr uint32_t kVersionFilePipelines = 1;
-constexpr size_t kHeaderFilePipelines = 2 * sizeof(uint32_t) + 2 * sizeof(uint64_t);
+// usf4-nx: version 2 adds an XXH3-64 of the list and the cache after the sizes. A crash while the file was being
+// replaced on the user's console (FAT32 SD card) left a file of the right size with damaged contents, which the size
+// check let through: the prewarm then never finished and the game stayed on "Now Loading" (2026-10-12).
+constexpr uint32_t kVersionFilePipelines = 2;
+constexpr size_t kHeaderFilePipelines = 2 * sizeof(uint32_t) + 3 * sizeof(uint64_t);
+inline uint64_t ChecksumFilePipelines(const uint8_t* list, size_t list_bytes, const uint8_t* cache, size_t cache_bytes) {
+  return XXH3_64bits_withSeed(cache, cache_bytes, XXH3_64bits(list, list_bytes));
+}
 // The two files used by earlier versions, next to the NRO: if the new one does not exist yet they are read
 // once (so the existing cache is not lost) and deleted when the new one is written.
 constexpr const char* kFileCacheOld = "masseffect_native_pipelines.bin";
@@ -7744,10 +7756,17 @@ class DrawsVulkanImpl final : public DrawsVulkan {
         std::memcpy(&bytes_list, all.data() + 8, 8);
         std::memcpy(&bytes_cache, all.data() + 16, 8);
       }
+      uint64_t checksum = 0;
+      if (all.size() >= kHeaderFilePipelines) std::memcpy(&checksum, all.data() + 24, 8);
       if (magic != kMagicFilePipelines || version != kVersionFilePipelines ||
           bytes_list > all.size() || bytes_cache > all.size() ||
           kHeaderFilePipelines + bytes_list + bytes_cache != all.size()) {
         REXLOG_WARN("[native] C6: pipeline file from another version or damaged: starting from scratch");
+        return;
+      }
+      if (ChecksumFilePipelines(all.data() + kHeaderFilePipelines, size_t(bytes_list),
+                                all.data() + kHeaderFilePipelines + bytes_list, size_t(bytes_cache)) != checksum) {
+        REXLOG_WARN("[native] C6: pipeline file damaged (checksum): starting from scratch");
         return;
       }
       const auto start = all.begin() + kHeaderFilePipelines;
@@ -7901,15 +7920,25 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       const uint32_t version = kVersionFilePipelines;
       const uint64_t bytes_list = written_list_.size();
       const uint64_t bytes_cache = written_cache_.size();
-      std::ofstream file(temporal, std::ios::binary | std::ios::trunc);
-      if (!file || !file.write(reinterpret_cast<const char*>(&magic), 4) ||
-          !file.write(reinterpret_cast<const char*>(&version), 4) ||
-          !file.write(reinterpret_cast<const char*>(&bytes_list), 8) ||
-          !file.write(reinterpret_cast<const char*>(&bytes_cache), 8) ||
-          !file.write(reinterpret_cast<const char*>(written_list_.data()), std::streamsize(bytes_list)) ||
-          !file.write(reinterpret_cast<const char*>(written_cache_.data()), std::streamsize(bytes_cache))) {
-        return;
-      }
+      const uint64_t checksum = ChecksumFilePipelines(written_list_.data(), written_list_.size(),
+                                                      written_cache_.data(), written_cache_.size());
+      std::FILE* file = std::fopen(temporal.string().c_str(), "wb");
+      if (!file) return;
+      const bool ok = std::fwrite(&magic, 4, 1, file) == 1 && std::fwrite(&version, 4, 1, file) == 1 &&
+                      std::fwrite(&bytes_list, 8, 1, file) == 1 && std::fwrite(&bytes_cache, 8, 1, file) == 1 &&
+                      std::fwrite(&checksum, 8, 1, file) == 1 &&
+                      (!bytes_list || std::fwrite(written_list_.data(), size_t(bytes_list), 1, file) == 1) &&
+                      (!bytes_cache || std::fwrite(written_cache_.data(), size_t(bytes_cache), 1, file) == 1) &&
+                      std::fflush(file) == 0;
+      // usf4-nx: the data on the card before the rename makes the new name point at it (FAT32 otherwise can
+      // persist the rename first).
+#if defined(_WIN32)
+      if (ok) _commit(_fileno(file));
+#else
+      if (ok) fsync(fileno(file));
+#endif
+      std::fclose(file);
+      if (!ok) return;
     }
     error.clear();
     std::filesystem::rename(temporal, path, error);
