@@ -391,3 +391,20 @@ the reader logs `C6: pipeline file damaged (checksum): starting from scratch` an
 Verified on Linux: a version-1 file is rejected ("from another version"), a new version-2 file is saved after the
 60 s timer, read back intact (6 pipelines), and the same file with one byte flipped in the middle is rejected.
 The first boot of 0.4.0 therefore starts with an empty cache, once.
+
+## Resolves that "nobody reads" (2026-10-12): not skipped
+
+The copy report's `*** NOBODY READS IT ***` only counted draws that sample the texture. Checked before skipping any:
+
+- **1F6F8000 1280x720 is the presented frame** (`sa2_diag_alias_frames`: every `PRESENT` is 1F6F8000). The Swap reads
+  `resolved_` directly. The report now says `(presented by the Swap)` for it, and EDRAM restores from a resolved
+  texture count as reads too.
+- `sa2_native_lazy_front` (present from the render target) does not help USF4: of 4,156 deferred copies, 4,138 were
+  recorded anyway before the target was drawn again; 18 were dropped.
+- **19326000 / 19362000 (320x180) are read in some sessions and not in others** (Switch logs: 918 reads over 9
+  reports, 4 reports with none), so learning "unread" per address would break the image later in a session.
+- What is left: in fights the scene render target is resolved three times in a row (no draws in between) into
+  three 1280x720 textures and the 544x720 tile halves; the first of each (Switch: 130AF000 / 13B77000; PC session:
+  18328000 / 18DF0000, the addresses move with the stage) is never sampled in our runs. That is ~1 Mpixel per frame at
+  540p, ~0.6-0.8 ms of a ~33 ms frame. Not skipped: our test fights never ran an Ultra or Super cinematic, the likely
+  reader, and a wrong skip shows a stale image with no way to recover the content.

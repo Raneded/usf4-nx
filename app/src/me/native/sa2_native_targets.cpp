@@ -8829,6 +8829,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       if (mode4) FailureEDRAM4("swapped owner restoration has no valid source", target);
       return false;
     }
+    ++it->second.reads;  // usf4-nx: a restore reads the texture too (copy report: not "nobody reads it")
     if (for_resolver) {
       // sa2_native_resolver_valid_content. Only the copy, with its barriers.
       if (!CopyOfLapForResolver(target, it->second.image)) return false;
@@ -9959,7 +9960,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                            address, c.width, c.height, c.copies, c.with_draws,
                            c.copies ? double(c.draws) / double(c.copies) : 0.0,
                            double(c.pixels) / 1e6, reads,
-                           c.copies && !reads ? " *** NOBODY READS IT ***" : "");
+                           !c.copies || reads ? ""
+                           // usf4-nx: the Swap reads the front buffer without going through ResolvedTexture
+                           : presented_fronts_.count(address) ? " (presented by the Swap)"
+                                                              : " *** NOBODY READS IT ***");
     }
     copies_per_target_.clear();
     SA2_REPORT_RING("[native] targets: faces resolved since the previous report:{}", list);
