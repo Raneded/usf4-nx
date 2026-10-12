@@ -393,6 +393,13 @@ REXCVAR_DEFINE_BOOL(sa2_native_precise_marks, true, "SA2 renderer",
 REXCVAR_DEFINE_BOOL(usf4_edram4_clear_into_depth, false, "USF4",
                     "EDRAM mode 4: a redirected color-0 clear whose tiles a D24S8/D24FS8 depth view owns clears that "
                     "view with the same 32-bit word read as depth/stencil (depth = word >> 8, stencil = word & 0xFF)");
+// usf4-nx: with the above, the color half went to the depth owners and came back to color through depth exports
+// (Switch 0.3.0: category 11 from 210 to ~715 ms per 10 s). The color-0 clear's tiles are stamped like the depth
+// redirect's, and the view that pulls them next (seen twice in a row) gets the clear and the tiles directly.
+REXCVAR_DEFINE_BOOL(usf4_edram4_clear_color_consumer, false, "USF4",
+                    "EDRAM mode 4: a redirected color-0 clear goes straight into the view that read its tiles next "
+                    "the last two times (a 1x/2x RGBA8 color view, or a depth view with usf4_edram4_clear_into_depth), "
+                    "which takes ownership of them, instead of the tiles' current owners");
 REXCVAR_DEFINE_BOOL(sa2_gpu_marks_categories, SA2_GPU_MARKS_CATEGORIES_DEFAULT, "SA2 renderer",
                     "Write a GPU timestamp at every category change (per-category GPU report). false: only the "
                     "first and last timestamp per submission (no per-category breakdown, fewer GPU flushes)")
@@ -5175,11 +5182,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       VkRect2D area;
       bool depth_owner = false;  // usf4-nx: the owner is a depth view (usf4_edram4_clear_into_depth)
       uint32_t owner_local = 0;  // the owner's own index of the run's first tile
+      bool reassign = false;  // usf4-nx: the owner is the learned consumer and takes the tiles
     };
     std::vector<Run> runs;
     VkClearColorValue value{};
     Image* drawn = nullptr;
     uint32_t word = 0;  // usf4-nx: the 32-bit EDRAM word the clear writes (byte c = channel c)
+    uint64_t site = 0;  // usf4-nx: SiteClear of the drawn color view (usf4_edram4_clear_color_consumer)
   };
   // usf4-nx: ReXGlue xenos Float20e4To32 (the inverse of WordFloat24EDRAM4).
   static float FromFloat24EDRAM4(uint32_t f24) {
@@ -5229,6 +5238,11 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     }
     const uint32_t pitch_tiles = PitchTilesEDRAM(*drawn);
     if (!pitch_tiles) return plan_no("no pitch");
+    plan.site = SiteClear(drawn, edram4_cleared_in_frame_[drawn]++);
+    if (REXCVAR_GET(usf4_edram4_clear_color_consumer) && PlanColor0ConsumerEDRAM4(plan, *drawn, o, tw, th, pitch_tiles)) {
+      plan.drawn = drawn;
+      return true;
+    }
     for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
       for (uint32_t tx = uint32_t(o[0]) / tw; tx < uint32_t(o[2]) / tw;) {
         const uint32_t local = ty * pitch_tiles + tx;
@@ -5275,6 +5289,52 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     return !plan.runs.empty();
   }
   const char* color0_plan_reason_ = "";
+  // usf4-nx: the color-0 clear's runs all in the learned consumer of its site (the view that pulled these tiles
+  // after the last two such clears), mapped tile by tile as the depth redirect's direct path does. false = the
+  // usual per-owner plan.
+  bool PlanColor0ConsumerEDRAM4(ColorClearEDRAM4& plan, const Image& drawn, const std::array<int32_t, 4>& o,
+                                uint32_t tw, uint32_t th, uint32_t pitch_tiles) {
+    const auto it = edram4_consumer_.find(plan.site);
+    Image* c = it != edram4_consumer_.end() && it->second.confidence >= 2 ? it->second.view : nullptr;
+    if (!c || c == &drawn || c->image == drawn.image || !c->prepared || c->invalid_content || c->guest_width ||
+        c->guest_height || c->raster_grid_x || c->edram_64bpp || !SamplesSupported(*c)) {
+      ++usf4_color0_consumer_no_[c ? "consumer view unsupported" : "no consumer seen twice"];
+      return false;
+    }
+    if (c->edram_depth ? !REXCVAR_GET(usf4_edram4_clear_into_depth) || (c->edram_format != 0 && c->edram_format != 1)
+                       : c->format != VK_FORMAT_R8G8B8A8_UNORM || c->edram_format != 0) {
+      ++usf4_color0_consumer_no_["consumer format"];
+      return false;
+    }
+    const uint32_t cp = PitchTilesEDRAM(*c);
+    const uint32_t cw = 80u >> c->edram_msaa_x, ch = 16u >> c->edram_msaa_y;
+    if (!cp || c->width % cw) {
+      ++usf4_color0_consumer_no_["consumer pitch"];
+      return false;
+    }
+    std::vector<ColorClearEDRAM4::Run> runs;
+    const uint32_t tx_end = uint32_t(o[2]) / tw;
+    for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
+      for (uint32_t tx = uint32_t(o[0]) / tw; tx < tx_end;) {
+        const uint32_t local = ty * pitch_tiles + tx;
+        const uint32_t lc = (drawn.edram_base + local - c->edram_base) & 2047u;
+        uint32_t count = 1;
+        while (tx + count < tx_end && (lc % cp) + count < cp) ++count;
+        const uint32_t x = (lc % cp) * cw, y = (lc / cp) * ch, width = cw * count;
+        if (x >= c->width || y >= c->height || width > c->width - x || ch > c->height - y) {
+          ++usf4_color0_consumer_no_["tiles outside the consumer"];
+          return false;
+        }
+        runs.push_back({c, local, count, {{int32_t(x), int32_t(y)}, {width, ch}}, bool(c->edram_depth), lc, true});
+        tx += count;
+      }
+    }
+    plan.runs = std::move(runs);
+    ++(c->edram_depth ? usf4_color0_consumer_depth_ : usf4_color0_consumer_color_);
+    return true;
+  }
+  uint64_t usf4_color0_consumer_color_ = 0, usf4_color0_consumer_depth_ = 0;
+  std::map<std::string, uint64_t> usf4_color0_consumer_no_;
   bool CommitClearColor0EDRAM4(const ColorClearEDRAM4& plan) {
     // Runs of consecutive tile rows of one owner that line up form one rectangle: a full-screen clear is one clear.
     struct Area {
@@ -5314,8 +5374,17 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     }
     BarrierClearEDRAM4();
     for (const auto& run : plan.runs) {
-      for (uint32_t i = 0; i < run.count; ++i)
-        owners_tiles_edram4_[(plan.drawn->edram_base + run.first_local + i) & 2047u].version = ++edram4_version_;
+      for (uint32_t i = 0; i < run.count; ++i) {
+        const uint32_t physical = (plan.drawn->edram_base + run.first_local + i) & 2047u;
+        auto& d = owners_tiles_edram4_[physical];
+        if (run.reassign) {  // usf4-nx: the consumer takes the tile (the clear wrote all of its word)
+          d = {run.owner, uint16_t((run.owner_local + i) & 2047u), 0};
+          ++edram4_epoch_;
+        }
+        d.version = ++edram4_version_;
+        edram4_stamps_[physical] = {plan.site, d.version};  // usf4-nx: who pulls them next (consumer learning)
+      }
+      if (run.reassign && !run.owner->edram_depth) StencilRealEDRAM4(*run.owner, run.owner_local, run.count);
       if (run.depth_owner) {  // both aspects written, as the depth redirect's in-place clears
         run.owner->edram4_bits_stencil |= uint8_t(stencil);
         StencilRealEDRAM4(*run.owner, run.owner_local, run.count);
@@ -9707,6 +9776,15 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       REXLOG_INFO("[native] EDRAM mode4 color 0 clears into depth owners (usf4_edram4_clear_into_depth): {} tiles",
                   usf4_color0_into_depth_tiles_);
     usf4_color0_into_depth_tiles_ = 0;
+    if (usf4_color0_consumer_color_ || usf4_color0_consumer_depth_ || !usf4_color0_consumer_no_.empty()) {
+      std::string no;
+      for (const auto& [reason, n] : usf4_color0_consumer_no_) no += fmt::format(" [{}: {}]", reason, n);
+      REXLOG_INFO("[native] EDRAM mode4 color 0 clears into their consumer (usf4_edram4_clear_color_consumer): {} "
+                  "into a color view, {} into a depth view; declined:{}", usf4_color0_consumer_color_,
+                  usf4_color0_consumer_depth_, no.empty() ? " none" : no);
+      usf4_color0_consumer_color_ = usf4_color0_consumer_depth_ = 0;
+      usf4_color0_consumer_no_.clear();
+    }
     edram4_redirected_color0_tiles_ = edram4_redirected_color0_areas_ = edram4_redirected_merged_ = 0;
     if (const uint64_t memo_total = edram4_memo_hits_ + edram4_memo_misses_ + edram4_memo_ineligible_) {
       REXLOG_INFO("[native] EDRAM draw memo (sa2_cpu_ring_edram_memo {}): {} draws prepared from the memo, {} by the "

@@ -408,3 +408,18 @@ The copy report's `*** NOBODY READS IT ***` only counted draws that sample the t
   18328000 / 18DF0000, the addresses move with the stage) is never sampled in our runs. That is ~1 Mpixel per frame at
   540p, ~0.6-0.8 ms of a ~33 ms frame. Not skipped: our test fights never ran an Ultra or Super cinematic, the likely
   reader, and a wrong skip shows a stale image with no way to recover the content.
+
+## Color-0 clears into their consumer (2026-10-12)
+
+With `usf4_edram4_clear_into_depth` (0.3.0) the color half of Direct3D's Clear went to the depth views that owned its
+tiles, and the color view that drew there next pulled it back through depth exports (Switch: category 11 from 210 to
+~715 ms per 10 s). `usf4_edram4_clear_color_consumer` stamps the color-0 clear's tiles like the depth redirect does
+(a site = drawn view + ordinal of its clears in the frame); the view that pulls them next, seen twice in a row, gets
+the clear and the tiles (`PlanColor0ConsumerEDRAM4`). Report: `color 0 clears into their consumer`.
+
+PC lockstep A/B (Training, Juri vs Hakan, frames 7000-7119): MAD 0.234 (baseline 0.2-0.4), differences only on the
+fighters. Of ~870 color-0 clears per 10 s, 393 went to a color view; declined: 351 with no consumer seen twice (the
+next reader alternates), 124 with tiles outside the consumer. GPU per unit of scene time (cat 4): depth exports
+-45 %, color aliases -12 %, depth imports (cat 10 + 13) +13 %, EDRAM total -4 % (PC GPU at P8: indicative). The
+depth view now imports back what it no longer owns, and 9-pass imports are dear on the Switch: judge it there at
+fixed clocks. On in the 0.4.0 Switch defaults; `usf4_edram4_clear_color_consumer = false` in usf4.toml for the A run.

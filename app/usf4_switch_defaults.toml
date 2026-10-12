@@ -33,3 +33,8 @@ switch_profile_stacks = true
 # 0.3.0: Direct3D's Clear through the 4x alias clears straight into the depth views that own its tiles
 # (docs/usf4-notes.md, "Clears into depth owners"): -81 % of the 9-pass depth imports in a fight.
 usf4_edram4_clear_into_depth = true
+
+# 0.4.0: the color half of that clear goes straight into the view that reads its tiles next (learned per clear), not
+# into the depth owners: on PC depth exports -45 %, color aliases -12 %, depth imports +13 %, same image
+# (docs/usf4-notes.md, "Color-0 clears into their consumer"). To A/B on the console: false in usf4.toml.
+usf4_edram4_clear_color_consumer = true
