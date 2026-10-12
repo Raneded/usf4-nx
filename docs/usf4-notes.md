@@ -423,3 +423,25 @@ next reader alternates), 124 with tiles outside the consumer. GPU per unit of sc
 -45 %, color aliases -12 %, depth imports (cat 10 + 13) +13 %, EDRAM total -4 % (PC GPU at P8: indicative). The
 depth view now imports back what it no longer owns, and 9-pass imports are dear on the Switch: judge it there at
 fixed clocks. On in the 0.4.0 Switch defaults; `usf4_edram4_clear_color_consumer = false` in usf4.toml for the A run.
+
+## 0.4.0 on the console, and the next limits (2026-10-12)
+
+User's console, 540p, CPU 1785 / GPU 998.4 / memory 2700: fights ~38.4 fps (0.3.0: 30.8), visibly slowed down (the
+game logic runs per frame). Both sides are now at the limit: GPU 26.2 ms per frame (EDRAM 15.7 ms of it: colour
+aliases 7.8, 9-pass imports 4.4, imports 2.2, exports 1.3; scene tiles 7.5) and the ring thread 25.9 ms (22.7 us x
+1,143 draws). PC timings on this box cannot measure the ring: under Xvfb 26 % of its time is the NVIDIA driver
+writing frames to the X socket, and the GTX 960M stays at P8.
+
+- Vertex dedupe content check (`usf4_dedupe_audit_each`, 16): fingerprinting was ~9 % of the console's ring thread and
+  never found a stale range. Now one copied range in 16 is fingerprinted and every hit on it is checked; a mismatch
+  logs a DIFFERENCE and checks every range for the session. PC fight: 19,204 -> 1,644 fingerprints per 10 s, same
+  hits (30 %), no mismatch. Misses (new `C6 vertex dedupe misses` line): 5,395 not in the table, 11,090 copied in an
+  older work slot, 11,708 forgotten at a guest wait.
+- **Predicated tiling** is the structural cost: 45 % of all draws are tile replays (765,348 of 1,677,758), and the
+  renderer already draws the guest's 2x MSAA targets with one sample, so the tiles buy nothing on screen.
+  `BeginTiling` is `sub_821FDA68` (r4 flags 1, r5 count 3, r6 rects 0-544 / 544-1088 / 1088-1280, all 720 high),
+  called from the engine's render-command handler `sub_82754260` (lr `0x827542DC`), which takes flags, count and
+  rects from a prepared command (+4, +8, +12 word offset of the rects). Textures of 1280x720 / 544x720 are created
+  through `sub_821F0B80` from `0x82792184`, `0x8253085C`, `0x822A4630`, `0x829FBF80`, `0x827579F4`, and
+  `sub_821F0CA0` from `0x827926F4`, `0x82792604`, `0x827579B8`, `0x82757930` (the engine's render-target setup is
+  around `0x8275xxxx`/`0x8279xxxx`). Diagnostic used: `out/diag/usf4_diag_tiling.cpp` (not in the build).

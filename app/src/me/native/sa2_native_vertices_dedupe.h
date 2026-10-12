@@ -120,9 +120,12 @@ class DedupeVertices {
     const Entry& e = table_[Index(key, bytes)];
     if (e.frame != frame_ || e.generation != generation_ || e.key != key ||
         e.bytes != bytes) {
+      // usf4-nx: why it missed (report): another range or never seen, an older work slot, a guest wait since.
+      ++misses_[e.key != key || e.bytes != bytes || e.frame == kEmpty ? 0 : e.frame != frame_ ? 1 : 2];
       return false;
     }
-    if (fingerprint != 0 && e.fingerprint != fingerprint) {
+    // usf4-nx: only entries recorded with a fingerprint are checked (usf4_dedupe_audit_each records one in N).
+    if (fingerprint != 0 && e.fingerprint != 0 && e.fingerprint != fingerprint) {
       ++discrepancies_;
       return false;
     }
@@ -132,6 +135,13 @@ class DedupeVertices {
     return true;
   }
 
+  // usf4-nx: the fingerprint of the live entry that Search would match (0 if none, or if it was recorded without
+  // one): the caller computes the content fingerprint only when there is something to compare it with.
+  uint64_t Fingerprint(uint64_t address, uint32_t bytes, uint32_t order) const {
+    const uint64_t key = Key(address, order);
+    const Entry& e = table_[Index(key, bytes)];
+    return e.frame == frame_ && e.generation == generation_ && e.key == key && e.bytes == bytes ? e.fingerprint : 0;
+  }
   // Records a copy just made. 'fingerprint' is only used in the paranoid mode of Search.
   void Note(uint64_t address, uint32_t bytes, uint32_t order, uint64_t offset,
               uint64_t fingerprint = 0) {
@@ -155,6 +165,8 @@ class DedupeVertices {
   uint64_t bytes_saved() const { return bytes_saved_; }
   uint64_t collisions() const { return collisions_; }
   uint64_t discrepancies() const { return discrepancies_; }
+  // usf4-nx: misses by reason: 0 not in the table, 1 copied in an older work slot, 2 forgotten at a guest wait.
+  const std::array<uint64_t, 3>& misses() const { return misses_; }
 
  private:
   static constexpr uint64_t kEmpty = ~uint64_t(0);
@@ -192,6 +204,7 @@ class DedupeVertices {
   uint64_t bytes_saved_ = 0;
   uint64_t collisions_ = 0;
   uint64_t discrepancies_ = 0;
+  std::array<uint64_t, 3> misses_{};
 };
 
 }  // namespace sa2::native

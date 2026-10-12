@@ -753,6 +753,16 @@ REXCVAR_DEFINE_INT32(sa2_native_fingerprint_mode, 0, "SA2 renderer",
                      "+crc, otherwise mode 1)")
     .range(0, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// usf4-nx: the content check of the vertex dedupe was ~9 % of the ring thread on the Switch (Fingerprint64, ~296,000
+// ranges per 10 s of a fight) and never found a stale range ("0 stale reuses prevented" in every log): since the ring
+// advances the sync epoch at every GPU-to-game signal (sa2_native_dedupe_sync_epochs) the dedupe is exact by
+// construction. Now only one copy in N is fingerprinted, and every later hit on it is checked; a mismatch logs a
+// DIFFERENCE and fingerprints every range for the rest of the session.
+REXCVAR_DEFINE_INT32(usf4_dedupe_audit_each, 16, "USF4",
+                     "Vertex dedupe: fingerprint one copied range in N and check the hits on it (a mismatch turns the "
+                     "check on for every range for the session). 1 = every range, as before")
+    .range(1, 4096)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sa2_native_dedupe_sample, true, "SA2 renderer",
                     "Vertex dedupe content check hashes sampled blocks (every 8th, SampleFingerprint) instead of the "
                     "whole range. false = full XXH3 of every range, as before");
@@ -3583,7 +3593,15 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       // Mass Effect on Switch: the full XXH3 of every range was ~18 % of the ring thread. With
       // sa2_native_dedupe_sample the check hashes every 8th block (SampleFingerprint) instead.
       static const uint32_t max_fingerprint = uint32_t(REXCVAR_GET(sa2_native_dedupe_max_fingerprint));
-      const bool fingerprinted = dedupe_active_ && type != 8 && (!max_fingerprint || source.bytes <= max_fingerprint);
+      static const uint32_t audit_each = uint32_t(REXCVAR_GET(usf4_dedupe_audit_each));
+      // usf4-nx (usf4_dedupe_audit_each): a fingerprint is needed to check a hit on an entry that has one, or for
+      // the one copy in N that records one.
+      const bool can_fingerprint =
+          dedupe_active_ && type != 8 && (!max_fingerprint || source.bytes <= max_fingerprint);
+      const bool fingerprinted = can_fingerprint &&
+          (audit_each <= 1 || dedupe_audit_all_ ||
+           dedupe_.Fingerprint(source.address, source.bytes, uint32_t(source.order)) != 0 ||
+           ++dedupe_audit_counter_ % audit_each == 0);
       const uint64_t vertices_fingerprint = fingerprinted
           ? std::max<uint64_t>(1, REXCVAR_GET(sa2_native_dedupe_sample)
                                       ? SampleFingerprint(source.data, source.bytes, source.bytes)
@@ -3603,6 +3621,12 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                          vertices_fingerprint)) {
         offsets_vertices[b] = offset;
         continue;
+      }
+      if (dedupe_.discrepancies() != discrepancies_before && audit_each > 1 && !dedupe_audit_all_) {
+        dedupe_audit_all_ = true;  // usf4_dedupe_audit_each: from now on every range is checked
+        sa2::enh::VerifyDifference();
+        REXLOG_ERROR("[native] DIFFERENCE: the vertex dedupe audit found a changed range ({:08X}, {} bytes): every "
+                     "range is fingerprinted for the rest of the session", source.address, source.bytes);
       }
       if (dedupe_.discrepancies() != discrepancies_before && dedupe_.discrepancies() <= 8) {
         REXLOG_WARN("[native] stale vertex reuse prevented: address {:08X}, {} bytes, "
@@ -5078,7 +5102,12 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                              double(dedupe_bytes_fingerprinted_ - report_dedupe_fingerprinted_) / 1048576.0,
                              dedupe_.discrepancies() - report_dedupe_discrepancies_,
                              dedupe_.collisions() - report_dedupe_collisions_);
+      const auto& m = dedupe_.misses();
+      SA2_REPORT_RING("[native] C6 vertex dedupe misses (10 s): {} not in the table, {} copied in an older work slot, "
+                      "{} forgotten at a guest wait for the GPU", m[0] - report_dedupe_misses_[0],
+                      m[1] - report_dedupe_misses_[1], m[2] - report_dedupe_misses_[2]);
     }
+    report_dedupe_misses_ = dedupe_.misses();
     report_dedupe_queries_ = dedupe_.queries();
     report_dedupe_hits_ = dedupe_.hits();
     report_dedupe_saved_ = dedupe_.bytes_saved();
@@ -13268,6 +13297,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   bool bound_memo_valid_ = false;
   // The "C6 draw stages" report: timed draws and the stage totals at the last report.
   uint64_t stage_draws_ = 0, report_stage_draws_ = 0;
+  std::array<uint64_t, 3> report_dedupe_misses_{};
   std::array<uint64_t, kStagesDraw> report_stages_ns_{};
   // The vertex dedupe's report (ReportBaseZero): fingerprints computed and the bytes they read, and the counters at
   // the last report.
@@ -13445,6 +13475,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   // Deduplication of vertex uploads within the frame.
   DedupeVertices dedupe_;
   bool dedupe_active_ = true;
+  bool dedupe_audit_all_ = false;  // usf4_dedupe_audit_each: a mismatch was found, fingerprint every range
+  uint32_t dedupe_audit_counter_ = 0;
   uint32_t dedupe_sinc_view_ = 0;  // last value seen of g_synchronizations_ring
   std::set<uint64_t> warnings_inv_resolved_size_;  // one trace per size
   std::unordered_map<const ShaderEntry*, VkShaderModule> modules_alpha_only_;
