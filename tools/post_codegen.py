@@ -35,18 +35,18 @@ def main():
     optimised = re.search(r'^\s*[a-z_]+\s*=\s*true', flavor_toml, re.M) is not None
     flavor = 'optimised' if optimised else 'classic'
     if optimised:
-        run(os.path.join(ROOT, 'tools', 'pch_no_volatile.py'), os.path.join(GEN, 'default', 'sa2_pch.h'),
-            os.path.join(GEN, 'data_dll', 'sa2_pch.h'))
+        # usf4-nx: one module (Default.xex), so one generated tree.
+        run(os.path.join(ROOT, 'tools', 'pch_no_volatile.py'), os.path.join(GEN, 'default', 'usf4_pch.h'))
         # REQUIRED with the line above: without barriers GCC turns guest polling loops into infinite loops.
-        run(os.path.join(ROOT, 'tools', 'loop_barriers.py'), os.path.join(GEN, 'default'),
-            os.path.join(GEN, 'data_dll'))
+        run(os.path.join(ROOT, 'tools', 'loop_barriers.py'), os.path.join(GEN, 'default'))
         os.environ.setdefault('REXSDK_DIR', os.path.join(ROOT, 'sdk'))
-        for tree in ('default', 'data_dll'):
+        for tree in ('default',):
             # Undo and redo in one pass: a function hooked since the last run (a new native) must be called through
             # its hook again. --redo writes only the files that change, so the build does not recompile the others.
             run(os.path.join(ROOT, 'tools', 'direct_calls.py'), '--redo', '--gen', os.path.join(GEN, tree))
-    run(os.path.join(ROOT, 'tools', 'localize_native.py'), '--list',
-        os.path.join(APP, 'src', 'cpu', 'hot', 'localized.txt'))
+    localized = os.path.join(APP, 'src', 'cpu', 'hot', 'localized.txt')
+    if os.path.isfile(localized):  # usf4-nx: no localized native copies (yet)
+        run(os.path.join(ROOT, 'tools', 'localize_native.py'), '--list', localized)
     # Round 7: the options added since round 6 are named too, so a console log tells the builds apart.
     extras = [name for key, name in (('non_volatile_as_local', 'non-volatile locals'), ('elide_lr_stores', 'no lr stores'),
                                      ('fp_moves_modeless', 'modeless fp moves'),

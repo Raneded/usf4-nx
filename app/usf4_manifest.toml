@@ -18,7 +18,8 @@ file_path = "../assets/game_root/Default.xex"
 out_directory_path = "generated/default"
 
 #   overrides.toml       written by hand: code the automatic function discovery misses, each with its evidence
-includes = ["overrides.toml"]
+#   codegen_flavor.toml  written by tools/codegen.sh --flavor: empty (classic) or a copy of perf_overrides.toml
+includes = ["overrides.toml", "codegen_flavor.toml"]
 
 # Not translated (yet): Capture.xex (image base 0x88000000, module flags 0x9 = title DLL). It is the replay recorder
 # for the YouTube upload feature ("[EmCaptureXenon]", ASF writer, XAV encoder, "No youtube account linked ..."),

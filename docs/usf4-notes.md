@@ -537,3 +537,19 @@ before the worker has painted it (the content is the same; the output reaches th
   ~12 % of the ring thread on the console, which now resets pools itself). 0.5.5 (`usf4_copy_tiles_merged`): tiles that
   are neighbours in both images form one rectangle (row runs, then rows of the same span): 9.4 -> 2.5 regions per
   call. Lockstep: differences only on the fighters' outlines (animation phase), none tile-shaped.
+
+## Optimised codegen, stage A (0.5.6, 2026-10-13)
+
+0.5.5 on the console (CPU 2193 / GPU 921.6): ~50-55 fps; cores 250 % of 300 %, GPU 73 %; ring thread 13.2 ms per
+frame (was 21.6), recording worker 39 % (was 87 %). The main thread (63 % busy, 42 % of its samples waiting in the
+kernel) became the limit: its waits were the codegen's global lock (`REX_ENTER_GLOBAL_LOCK`, one process-wide recursive
+mutex for every mfmsr/mtmsrd pair) in the XDK interlocked list pops (`sub_82966BA8`, via `sub_82967288`/`sub_828F62A8`/
+`sub_82925FC8`) against the job workers and the audio thread, plus `NtPulseEvent` (the SDK's `PosixEvent::Pulse` takes a
+mutex and sleeps).
+
+USF4 used the classic codegen. Ported sa2-nx's optimised flavour, stage A (`app/perf_overrides.toml`; `tools/codegen.sh
+--flavor optimised|classic` writes `app/codegen_flavor.toml`, which the manifest includes): cr/ctr/xer/reservation as
+locals, skip_msr, dform_disp_split, fctiwz_inline, fp_moves_modeless; post steps (`tools/post_codegen.py`, also appended
+to the build's own codegen command): no-volatile guest loads/stores + loop barriers (32,010 loop headers) + direct
+calls (132,354 calls, 393 hooked addresses kept). Stage B (non_volatile_as_local, elide_lr_stores,
+non_argument_as_local) needs the read-before-write and non-argument audits first. PC: boots and fights normally.

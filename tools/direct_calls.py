@@ -31,9 +31,8 @@ APP = os.path.join(ROOT, 'app')
 GEN = os.path.join(APP, 'generated', 'default')
 SDK = os.environ.get('REXSDK_DIR') or os.path.join(ROOT, 'sdk')
 SOURCES = [os.path.join(APP, 'src'), os.path.join(SDK, 'src'), os.path.join(SDK, 'include'),
-           os.path.join(APP, 'overrides.toml'), os.path.join(APP, 'overrides_data_dll.toml'),
-           os.path.join(APP, 'perf_overrides.toml'), os.path.join(APP, 'sa2_manifest.toml'),
-           os.path.join(APP, 'CMakeLists.txt')]
+           os.path.join(APP, 'overrides.toml'), os.path.join(APP, 'perf_overrides.toml'),
+           os.path.join(APP, 'usf4_manifest.toml'), os.path.join(APP, 'CMakeLists.txt')]
 # Diagnostic builds (e.g. the Direct3D census) list hooks that live outside the scanned sources here, one sub_X per
 # line; an empty or missing file adds nothing. Every run reads it, so a codegen re-run keeps them.
 EXTRA_LIST = os.path.join(ROOT, 'out', 'extra_hooks.txt')

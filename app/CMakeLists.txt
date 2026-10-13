@@ -22,6 +22,17 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/rexglue.cmake")
 endif()
 include(generated/rexglue.cmake)
 
+# The build re-runs the generator by itself whenever an input in codegen.d changes (manifest, toml, xex, the generator
+# binary). That rewrites app/generated and would silently drop the codegen flavour's post-codegen steps (no-volatile
+# pch + loop barriers, direct calls): they are appended to the same command (sa2-nx). The Switch cross build has no
+# generator target, so this only applies on the PC.
+if(TARGET usf4_codegen)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_custom_command(OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/codegen.build.stamp" APPEND
+        COMMAND "${CMAKE_COMMAND}" -E env "REXSDK_DIR=${REXSDK_DIR}"
+                "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/post_codegen.py")
+endif()
+
 set(USF4_SOURCES
     src/main.cpp
     # Linux: logs fatal host signals the SDK does not report (illegal instruction, ...) with the executable offset.
@@ -79,8 +90,16 @@ else()
     add_executable(usf4 ${USF4_SOURCES})
 endif()
 
-# The codegen flavour names the build in the first "[enh]" log line (sa2-nx); USF4 uses the classic codegen.
-set_source_files_properties(src/cpu/sa2_enhancements.cpp PROPERTIES COMPILE_DEFINITIONS "SA2_BUILD_FLAVOR=\"classic codegen\"")
+# The codegen flavour (tools/codegen.sh --flavor) names the build in the first "[enh]" log line (sa2-nx).
+set(USF4_FLAVOR_FILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/codegen_flavor.txt")
+set(USF4_BUILD_FLAVOR "classic codegen")
+if(EXISTS "${USF4_FLAVOR_FILE}")
+    file(READ "${USF4_FLAVOR_FILE}" USF4_BUILD_FLAVOR)
+    string(STRIP "${USF4_BUILD_FLAVOR}" USF4_BUILD_FLAVOR)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${USF4_FLAVOR_FILE}")
+endif()
+set_source_files_properties(src/cpu/sa2_enhancements.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SA2_BUILD_FLAVOR=\"${USF4_BUILD_FLAVOR}\"")
 
 # Link the SDK. Stage 3 draws with ReXGlue's Xenos GPU emulation; the native renderer replaces it in stage 4.
 rexglue_setup_target(usf4 GPU_PLUGINS xenos)
@@ -206,6 +225,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "usf4-nx"
-        VERSION "0.5.5"
+        VERSION "0.5.6"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
 endif()
