@@ -3504,9 +3504,17 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
       ++trace_quiet_draws_;
       return;
     }
+    if ((Register(kRegVgtDrawInitiator) & 63) == 5) {  // usf4-nx: screen-space quads: their first VS constants
+      std::string c;
+      for (uint32_t i = 0; i < 16; ++i)
+        c += fmt::format("{}{:g}", i % 4 ? "," : " | c" + std::to_string(i / 4) + " ",
+                         std::bit_cast<float>(Register(g::XE_GPU_REG_SHADER_CONSTANT_000_X + i)));
+      REXLOG_INFO("[trace] #{} QUAD VS constants{}", draws_, c);
+    }
     const uint32_t tl = Register(g::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL), br = Register(g::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR);
     REXLOG_INFO("[trace] #{} DRAW {} VS n{} PS n{} prim {} count {} scissor {},{}-{},{} blend0 {:08X} mask {:08X} "
-                "depth {:08X} rt1 {:08X} blend1 {:08X} c0 {:08X} {:08X} {:08X} {:08X}:{}", draws_,
+                "depth {:08X} rt1 {:08X} blend1 {:08X} c0 {:08X} {:08X} {:08X} {:08X} vp x {:.1f}+{:.1f} y {:.1f}+{:.1f} "
+                "woff {:08X}:{}", draws_,
                 trace_result_ == 1 ? "ok" : trace_result_ == 0 ? fmt::format("REJ{}", g_banjo_last_reject_cause)
                                                                 : std::string("SKIP"),
                 draw_vs_ ? int64_t(draw_vs_->number) : -1, draw_ps_ ? int64_t(draw_ps_->number) : -1,
@@ -3516,6 +3524,10 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
                 Register(g::XE_GPU_REG_RB_COLOR1_INFO), Register(g::XE_GPU_REG_RB_BLENDCONTROL1),
                 Register(g::XE_GPU_REG_SHADER_CONSTANT_256_X), Register(g::XE_GPU_REG_SHADER_CONSTANT_256_Y),
                 Register(g::XE_GPU_REG_SHADER_CONSTANT_256_Z), Register(g::XE_GPU_REG_SHADER_CONSTANT_256_W),
+                std::bit_cast<float>(Register(g::XE_GPU_REG_PA_CL_VPORT_XOFFSET)),
+                std::bit_cast<float>(Register(g::XE_GPU_REG_PA_CL_VPORT_XSCALE)),
+                std::bit_cast<float>(Register(g::XE_GPU_REG_PA_CL_VPORT_YOFFSET)),
+                std::bit_cast<float>(Register(g::XE_GPU_REG_PA_CL_VPORT_YSCALE)), Register(g::XE_GPU_REG_PA_SC_WINDOW_OFFSET),
                 textures);
   }
 

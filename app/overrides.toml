@@ -214,3 +214,27 @@ longjmp_address = 0x82517AF0
 "0x829A4E98" = { }  # 12 instructions, pointer at 0x82128520
 "0x829CADF8" = { }  # 2 instructions, built at 0x829CBF3C
 "0x82A5C3A8" = { }  # 3 instructions, pointer at 0x82A70210
+
+# usf4_single_tile (src/usf4_tiling.cpp): sub_82971F68 picks the scene's tile preset (r14) and MSAA index (r24) from the
+# display height; all four paths meet at 0x82972060 (li r15,1024). Found 2026-10-13: BeginTiling sub_821FDA68 gets 3
+# rects from render-target objects filled by sub_82791BE0 from the preset table at 0x820DE8F0 ({count, rects}); the
+# descriptors (debug name "Main Tile Depth") come from sub_82971F68.
+[[midasm_hook]]
+address = 0x82972060
+name = "usf4_scene_tiling"
+registers = ["r14", "r24"]
+
+# usf4_single_tile: the same function's second display-mode switch sets the tile-local texture size (720p: r26 = 544,
+# the strip width; r29 = 1280); its paths meet at 0x829728B4 (stw r26,92(r1)).
+[[midasm_hook]]
+address = 0x829728B4
+name = "usf4_scene_tile_size"
+registers = ["r26", "r29"]
+
+# usf4_single_tile: sub_8296E028 copies the post-process strips (floats from 0x821295A4 at 720p) into its object (r31):
+# count +684, rects +696/+712/+728. After its last store (0x8296E85C, stw r10,712(r31)) one rect, the screen.
+[[midasm_hook]]
+address = 0x8296E85C
+name = "usf4_post_tiles"
+registers = ["r31"]
+after_instruction = true

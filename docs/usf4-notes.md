@@ -445,3 +445,28 @@ writing frames to the X socket, and the GTX 960M stays at P8.
   through `sub_821F0B80` from `0x82792184`, `0x8253085C`, `0x822A4630`, `0x829FBF80`, `0x827579F4`, and
   `sub_821F0CA0` from `0x827926F4`, `0x82792604`, `0x827579B8`, `0x82757930` (the engine's render-target setup is
   around `0x8275xxxx`/`0x8279xxxx`). Diagnostic used: `out/diag/usf4_diag_tiling.cpp` (not in the build).
+
+## One tile instead of three (`usf4_single_tile`, 2026-10-13)
+
+How USF4 chooses its tiling (found with temporary hooks, `out/diag/usf4_diag_scan.cpp`, not in the build):
+
+- `sub_82971F68` (render-target setup) reads the display height (engine config +2724) and picks a mode: 720 -> 0,
+  768 -> 1, 576 -> 2, other -> 3. Mode 0 sets the tile preset r14 = 6 and the MSAA index r24 = 1 (2x).
+- Tile presets: a table at `0x820DE8F0` of {count, rects} (index 1 = one tile 0,0-1280,720; 6 = three strips of
+  544). `sub_82791BE0` copies the chosen preset into each render-target object (+40 count, +44 rects), and the
+  render-command handler `sub_82754260` passes them to `BeginTiling` (`sub_821FDA68`). MSAA index -> type through
+  `0x820DE654`; `sub_82792670` creates the EDRAM surface (`sub_821F0CA0`, CreateRenderTarget).
+- The same function's second mode switch sizes the tile-local textures ("Main Tile Depth" and others): 720p r26 = 544.
+- `sub_8296E028` copies the post-process strips as floats from `0x821295A4` into its object (+684 count, +696 rects).
+
+Three `[[midasm_hook]]` entries (`app/overrides.toml`, `src/usf4_tiling.cpp`) turn this into one tile: preset 1 and
+MSAA 0 at `0x82972060`, tile textures 1280 wide at `0x829728B4`, one post-process rect (0,0-1280,720) after
+`0x8296E85C`. The game then lays out EDRAM as colour 0 at 0, colour 1 at 736, depth at 1472 (1x, 720 tiles each);
+the depth runs to tile 2208, past the 2048 of real EDRAM, and wraps over colour 0's top 160 rows. No visible effect
+and no significant transfer pair for it in the PC runs; a 4096-tile EDRAM model would remove it if the console shows
+a cost.
+
+PC results (Training fight, 150 frames each): draws per frame 394 -> 202 (-49 %), native draws 444,350 -> 242,620
+per 10 s; colour alias operations 11,097 -> 0, depth exports 15,898 -> 976, depth imports 40,497 -> 19,983.
+Lockstep image A/B (frames 7000-7119): no offset (best alignment 0,0), MAD 3.45 spread evenly: edges are a little
+harder, because the 3-strip path's 2x MSAA did smooth them. GPU time can only be judged on the console.

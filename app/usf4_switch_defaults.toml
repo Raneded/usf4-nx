@@ -38,3 +38,8 @@ usf4_edram4_clear_into_depth = true
 # into the depth owners: on PC depth exports -45 %, color aliases -12 %, depth imports +13 %, same image
 # (docs/usf4-notes.md, "Color-0 clears into their consumer"). To A/B on the console: false in usf4.toml.
 usf4_edram4_clear_color_consumer = true
+
+# 0.5.0: one 1280x720 tile without MSAA instead of predicated tiling (three strips at 2x MSAA): about half the draws,
+# no colour aliases (docs/usf4-notes.md, "One tile instead of three"). Edges are a little harder (the game's 2x MSAA
+# is gone). false in usf4.toml for the three strips.
+usf4_single_tile = true

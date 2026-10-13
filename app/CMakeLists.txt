@@ -49,6 +49,8 @@ set(USF4_SOURCES
     src/me/native/sa2_native_glue.cpp
     # USF4's Direct3D addresses (shader load, Draw*) and the shader container dump (usf4_dump_shaders).
     src/me/usf4_me_hooks.cpp
+    # Mid-function hooks of overrides.toml ([[midasm_hook]]): one tile instead of predicated tiling (usf4_single_tile).
+    src/usf4_tiling.cpp
     # The SA2-only parts of the renderer glue that are not ported (native Direct3D layer, census): off.
     src/me/usf4_api_stubs.cpp
     # Render resolution per console mode (docked / handheld) and MSAA: sa2_render_height_*, sa2_msaa.
@@ -203,6 +205,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "usf4-nx"
-        VERSION "0.4.0"
+        VERSION "0.5.0"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
 endif()
