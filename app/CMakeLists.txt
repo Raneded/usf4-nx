@@ -206,6 +206,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "usf4-nx"
-        VERSION "0.5.3"
+        VERSION "0.5.4"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
 endif()

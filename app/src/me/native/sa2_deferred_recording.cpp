@@ -1,6 +1,7 @@
 // Deferred Vulkan command recording: see sa2_deferred_recording.h.
 #include "sa2_deferred_recording.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -63,6 +64,12 @@ REXCVAR_DEFINE_BOOL(sa2_deferred_native_update, false, "SA2 renderer",
                     "drains first")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_INT32(usf4_deferred_slots_log2, 10, "SA2 renderer",
+                     "Deferred recording queue length as a power of two (10 = 1024 calls, 128 KB; 12 = 4096, 512 KB). "
+                     "A USF4 fight frame queues ~4,900 calls: a short queue makes the ring thread and the worker take "
+                     "turns")
+    .range(8, 14)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(usf4_deferred_async_submit, false, "SA2 renderer",
                     "usf4-nx: the end of the frame does not wait for the recording worker: the work submission and the "
                     "output paint run on the worker, in queue order, and reusing a slot waits only until the worker "
@@ -75,7 +82,9 @@ namespace {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Queue: single producer (the ring thread), single consumer (the worker).
-constexpr size_t kSlots = size_t(1) << 10;  // 2 MB: the process runs within a few MB of its limit
+// usf4-nx: the queue length is a cvar (usf4_deferred_slots); 1024 before (128 KB: the process runs within a few MB
+// of its limit). 1024 calls are ~1/5 of a USF4 fight frame (~4,900 calls): ring thread and worker took turns.
+size_t g_slots = size_t(1) << 10;
 constexpr size_t kLoad = 112;
 struct alignas(16) Slot {
   void (*run)(void*) = nullptr;
@@ -110,7 +119,7 @@ size_t g_arena_usage = 0;
 bool g_arena_ring = false;
 uint64_t g_arena_head = 0, g_arena_tail = 0;  // virtual offsets (mod kArena)
 struct ArenaMark { uint64_t index, end; };
-ArenaMark* g_arena_marks = nullptr;  // kSlots entries: at most one per queued call
+ArenaMark* g_arena_marks = nullptr;  // g_slots entries: at most one per queued call
 uint64_t g_marks_first = 0, g_marks_end = 0;
 uint64_t g_arena_waits = 0;
 
@@ -158,24 +167,33 @@ void PublishAlready() {
   Wake();
 }
 
+uint64_t g_full_waits = 0, g_ns_full = 0;
+
 Slot& Reserve() {
   if (g_fast) {
-    if (g_written_producer - g_read_view >= kSlots) {
+    if (g_written_producer - g_read_view >= g_slots) {
+      g_read_view = g_read.load(std::memory_order_acquire);
+    }
+    if (g_written_producer - g_read_view >= g_slots) {
       if (g_published != g_written_producer) PublishAlready();  // the worker cannot free slots it was not told about
+      const auto t0 = std::chrono::steady_clock::now();
+      ++g_full_waits;
       for (;;) {
         g_read_view = g_read.load(std::memory_order_acquire);
-        if (g_written_producer - g_read_view < kSlots) break;
+        if (g_written_producer - g_read_view < g_slots) break;
         Wake();
         ShortPause(std::chrono::microseconds(20));
       }
+      g_ns_full += uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     }
-    return g_queue[g_written_producer & (kSlots - 1)];
+    return g_queue[g_written_producer & (g_slots - 1)];
   }
-  while (g_written_producer - g_read.load(std::memory_order_acquire) >= kSlots) {
+  while (g_written_producer - g_read.load(std::memory_order_acquire) >= g_slots) {
     Wake();
     ShortPause(std::chrono::microseconds(20));
   }
-  return g_queue[g_written_producer & (kSlots - 1)];
+  return g_queue[g_written_producer & (g_slots - 1)];
 }
 
 void Publish() {
@@ -202,7 +220,7 @@ void Worker() {
         // The producer only needs the read index when the queue is full or to drain: every 16 commands and at the
         // end of the burst (drain waits for g_read == g_written_producer, which the final store provides).
         do {
-          Slot& r = g_queue[read & (kSlots - 1)];
+          Slot& r = g_queue[read & (g_slots - 1)];
           r.run(r.load);
           ++read;
           if ((read & 15) == 0) g_read.store(read, std::memory_order_release);
@@ -210,7 +228,7 @@ void Worker() {
         g_read.store(read, std::memory_order_release);
       } else {
         do {
-          Slot& r = g_queue[read & (kSlots - 1)];
+          Slot& r = g_queue[read & (g_slots - 1)];
           r.run(r.load);
           ++read;
           g_read.store(read, std::memory_order_release);
@@ -288,9 +306,9 @@ void Report() {
       causes += fmt::format(" {} {} ({} waited, {:.1f} ms);", c.what, c.drains, c.waits, double(c.ns) / 1e6);
       c.drains = c.waits = c.ns = 0;
     }
-    REXLOG_INFO("[native] deferred recording drains by cause (10 s):{} arena waits (ring) {}", causes,
-                g_arena_waits);
-    g_arena_waits = 0;
+    REXLOG_INFO("[native] deferred recording drains by cause (10 s):{} arena waits (ring) {}; queue full {} times "
+                "({:.1f} ms waiting for the worker)", causes, g_arena_waits, g_full_waits, double(g_ns_full) / 1e6);
+    g_arena_waits = g_full_waits = g_ns_full = 0;
     g_queued = g_direct = g_drains = g_drains_with_wait = g_ns_wait = 0;
     g_batches = g_updates = g_direct_updates = 0;
   }
@@ -299,8 +317,8 @@ void Report() {
 // One arena block for all arrays of one call (a drain inside would reuse memory already copied for it).
 void ArenaRelease() {
   const uint64_t read = g_read.load(std::memory_order_acquire);
-  while (g_marks_first != g_marks_end && g_arena_marks[g_marks_first % kSlots].index < read) {
-    g_arena_tail = g_arena_marks[g_marks_first % kSlots].end;
+  while (g_marks_first != g_marks_end && g_arena_marks[g_marks_first % g_slots].index < read) {
+    g_arena_tail = g_arena_marks[g_marks_first % g_slots].end;
     ++g_marks_first;
   }
   if (g_marks_first == g_marks_end && read == g_written_producer) g_arena_tail = g_arena_head;
@@ -327,7 +345,7 @@ uint8_t* ArenaRing(size_t bytes) {
   uint8_t* p = g_arena + g_arena_head % kArena;
   g_arena_head += bytes;
   // The call that uses this block is the next one queued (index g_written_producer).
-  g_arena_marks[g_marks_end % kSlots] = {g_written_producer, g_arena_head};
+  g_arena_marks[g_marks_end % g_slots] = {g_written_producer, g_arena_head};
   ++g_marks_end;
   return p;
 }
@@ -778,18 +796,19 @@ const Functions& Table(const Functions& real_fns) {
     }
     g_fast = REXCVAR_GET(sa2_deferred_native_fast);
     g_batch = g_fast ? uint32_t(REXCVAR_GET(sa2_deferred_native_batch)) : 1;
-    g_queue = new (std::nothrow) Slot[kSlots];
+    g_slots = size_t(1) << std::clamp(REXCVAR_GET(usf4_deferred_slots_log2), 8, 14);
+    g_queue = new (std::nothrow) Slot[g_slots];
     g_arena = new (std::nothrow) uint8_t[kArena];
     g_arena_ring = REXCVAR_GET(usf4_deferred_async_submit);
-    if (g_arena_ring) g_arena_marks = new (std::nothrow) ArenaMark[kSlots];
+    if (g_arena_ring) g_arena_marks = new (std::nothrow) ArenaMark[g_slots];
     if (!g_queue || !g_arena || (g_arena_ring && !g_arena_marks)) {
       REXLOG_ERROR("[native] deferred recording DISABLED: out of memory for the queue ({} KB)",
-                   (sizeof(Slot) * kSlots + kArena) / 1024);
+                   (sizeof(Slot) * g_slots + kArena) / 1024);
       return false;
     }
     g_active.store(true, std::memory_order_release);
-    REXLOG_INFO("[native] deferred recording ready: {} queue slots, {} MB arena", kSlots,
-                kArena >> 20);
+    REXLOG_INFO("[native] deferred recording ready: {} queue slots ({} KB), {} KB arena", g_slots,
+                sizeof(Slot) * g_slots / 1024, kArena >> 10);
     return true;
   }();
   return built && (REXCVAR_GET(sa2_native_deferred_recording_parts) & 1) ? g_proxy : real_fns;

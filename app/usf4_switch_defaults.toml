@@ -50,3 +50,8 @@ usf4_single_tile = true
 # 26 % of its time, at vkEndCommandBuffer). PC: 0 drains in a fight, same frames (docs/usf4-notes.md). false in
 # usf4.toml for the previous behaviour.
 usf4_deferred_async_submit = true
+
+# 0.5.4: a deferred recording queue of 4096 calls (512 KB) instead of 1024. On 0.5.3 the ring thread was "working"
+# 21.6 ms per 21.7 ms frame but on the CPU only 68 % of it: the rest it waited for room in the queue (~1/5 of a frame).
+# The log line "deferred recording drains by cause" says how often the queue is still full. 10 = the previous length.
+usf4_deferred_slots_log2 = 12
