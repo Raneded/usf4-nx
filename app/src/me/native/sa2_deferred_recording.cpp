@@ -168,6 +168,8 @@ void PublishAlready() {
 }
 
 uint64_t g_full_waits = 0, g_ns_full = 0;
+// usf4-nx: calls NVK records through its meta paths (render passes with temporary image views on the graphics queue).
+uint64_t g_n_copy = 0, g_n_copy_regions = 0, g_n_blit = 0, g_n_resolve = 0, g_n_clear_color = 0, g_n_clear_depth = 0;
 
 Slot& Reserve() {
   if (g_fast) {
@@ -309,6 +311,10 @@ void Report() {
     REXLOG_INFO("[native] deferred recording drains by cause (10 s):{} arena waits (ring) {}; queue full {} times "
                 "({:.1f} ms waiting for the worker)", causes, g_arena_waits, g_full_waits, double(g_ns_full) / 1e6);
     g_arena_waits = g_full_waits = g_ns_full = 0;
+    REXLOG_INFO("[native] deferred recording, meta-path calls (10 s): vkCmdCopyImage {} ({} regions), "
+                "vkCmdBlitImage {}, vkCmdResolveImage {}, vkCmdClearColorImage {}, vkCmdClearDepthStencilImage {}",
+                g_n_copy, g_n_copy_regions, g_n_blit, g_n_resolve, g_n_clear_color, g_n_clear_depth);
+    g_n_copy = g_n_copy_regions = g_n_blit = g_n_resolve = g_n_clear_color = g_n_clear_depth = 0;
     g_queued = g_direct = g_drains = g_drains_with_wait = g_ns_wait = 0;
     g_batches = g_updates = g_direct_updates = 0;
   }
@@ -588,6 +594,7 @@ void ClearAttached(VkCommandBuffer cb, uint32_t na, const VkClearAttachment* a, 
 }
 void ClearColor(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue* v, uint32_t n,
                  const VkImageSubresourceRange* r) {
+  ++g_n_clear_color;
   if (!IsProducer()) return g_real.vkCmdClearColorImage(cb, i, l, v, n, r);
   uint8_t* c = Arena(Size<VkClearColorValue>(1) + Size<VkImageSubresourceRange>(n));
   const auto* v2 = Copy(c, v, 1);
@@ -694,24 +701,29 @@ PFN_vkCmdInsertDebugUtilsLabelEXT g_label = nullptr;
 
 void CopyImage(VkCommandBuffer cb, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n,
                   const VkImageCopy* r) {
+  ++g_n_copy;
+  g_n_copy_regions += n;
   if (!IsProducer()) return g_copy_image(cb, a, la, b, lb, n, r);
   uint8_t* c = Arena(Size<VkImageCopy>(n));
   Enqueue(g_copy_image, cb, a, la, b, lb, n, Copy(c, r, n));
 }
 void ResolveImage(VkCommandBuffer cb, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n,
                   const VkImageResolve* r) {
+  ++g_n_resolve;
   if (!IsProducer()) return g_resolve_image(cb, a, la, b, lb, n, r);
   uint8_t* c = Arena(Size<VkImageResolve>(n));
   Enqueue(g_resolve_image, cb, a, la, b, lb, n, Copy(c, r, n));
 }
 void Blit(VkCommandBuffer cb, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n,
           const VkImageBlit* r, VkFilter f) {
+  ++g_n_blit;
   if (!IsProducer()) return g_blit(cb, a, la, b, lb, n, r, f);
   uint8_t* c = Arena(Size<VkImageBlit>(n));
   Enqueue(g_blit, cb, a, la, b, lb, n, Copy(c, r, n), f);
 }
 void ClearDepth(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearDepthStencilValue* v, uint32_t n,
                        const VkImageSubresourceRange* r) {
+  ++g_n_clear_depth;
   if (!IsProducer()) return g_clear_depth(cb, i, l, v, n, r);
   uint8_t* c = Arena(Size<VkClearDepthStencilValue>(1) + Size<VkImageSubresourceRange>(n));
   const auto* v2 = Copy(c, v, 1);

@@ -250,6 +250,10 @@ REXCVAR_DEFINE_INT32(sa2_native_edram4_stencil_copy_min_tiles, 32, "SA2 renderer
                      "EDRAM mode 4: smallest import (tiles) whose stencil goes through the copy engine; smaller "
                      "ones use masked stencil draws in the import pass (no engine switches). 0 = always copy")
     .range(0, 2048);
+REXCVAR_DEFINE_BOOL(usf4_copy_tiles_merged, true, "SA2 renderer",
+                    "EDRAM mode 4 tile copies (vkCmdCopyImage): neighbouring tiles as one rectangle instead of one "
+                    "region per tile (same pixels; NVK records each colour region as its own render pass)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sa2_native_depth_samples_x, true, "SA2 renderer",
                     "Experimental MODE4: preserve horizontal samples in depth-only 4x MSAA draws. "
                     "Y samples remain collapsed; expanded-depth direct resolves and FragCoord shaders "
@@ -4727,6 +4731,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     const uint32_t tile_width = 80u >> (uint32_t(target.edram_64bpp) + target.edram_msaa_x);
     const uint32_t tile_height = 16u >> target.edram_msaa_y;
     std::vector<VkImageCopy> regions;
+    // usf4-nx (usf4_copy_tiles_merged): tiles that are neighbours in both images go in one rectangle (a row of tiles,
+    // then rows of the same span): the same pixels with far fewer regions. NVK copies colour images region by
+    // region through vk_meta (pipeline, two temporary views, a descriptor set, a render pass and a draw each): a
+    // fight frame had ~16,000 one-tile regions.
+    static const bool merged = REXCVAR_GET(usf4_copy_tiles_merged);
+    struct Rect { uint32_t sx, sy, dx, dy, w, h; };
+    std::vector<Rect> rects;
     for (uint32_t i = 0; i < count; ++i) {
       const uint32_t so = source_start + i, sd = target_start + i;
       const uint32_t sx = (so % PitchTilesEDRAM(source)) * tile_width;
@@ -4739,12 +4750,42 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
           source.height - sy < std::min(tile_height, target.height - dy)) return false;
       const VkExtent3D extent{std::min({tile_width, source.width - sx, target.width - dx}),
                               std::min({tile_height, source.height - sy, target.height - dy}), 1};
+      Rect t{sx, sy, dx, dy, extent.width, extent.height};
+      if (merged && !rects.empty()) {
+        Rect& last = rects.back();
+        if (last.sy == t.sy && last.dy == t.dy && last.h == t.h && last.sx + last.w == t.sx &&
+            last.dx + last.w == t.dx) {
+          last.w += t.w;  // the next tile of the same row in both images
+          continue;
+        }
+      }
+      rects.push_back(t);
+    }
+    if (merged && rects.size() > 1) {
+      // Rows of the same span, one below the other in both images.
+      std::vector<Rect> stacked;
+      stacked.reserve(rects.size());
+      for (const Rect& r : rects) {
+        bool joined = false;
+        for (auto it = stacked.rbegin(); it != stacked.rend() && it->sy + it->h >= r.sy; ++it) {
+          if (it->sx == r.sx && it->dx == r.dx && it->w == r.w && it->sy + it->h == r.sy &&
+              it->dy + it->h == r.dy) {
+            it->h += r.h;
+            joined = true;
+            break;
+          }
+        }
+        if (!joined) stacked.push_back(r);
+      }
+      rects.swap(stacked);
+    }
+    for (const Rect& t : rects) {
       const auto add = [&](VkImageAspectFlags aspect) {
         VkImageCopy r{};
         r.srcSubresource = r.dstSubresource = {aspect, 0, 0, 1};
-        r.srcOffset = {int32_t(sx), int32_t(sy), 0};
-        r.dstOffset = {int32_t(dx), int32_t(dy), 0};
-        r.extent = extent;
+        r.srcOffset = {int32_t(t.sx), int32_t(t.sy), 0};
+        r.dstOffset = {int32_t(t.dx), int32_t(t.dy), 0};
+        r.extent = {t.w, t.h, 1};
         regions.push_back(r);
       };
       if (target.edram_depth) {

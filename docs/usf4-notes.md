@@ -523,3 +523,17 @@ PC one-tile fight: 0 drains and 0 ticket waits per 10 s (before: ~170 drains, 34
 capture (frames 7000-7119): every frame equals the reference's same or previous frame (MAD 0.00-0.08 in the first 30
 frames); 33 captured frames repeat the previous one because the recorder samples the output at the guest's swap,
 before the worker has painted it (the content is the same; the output reaches the presenter later).
+
+## 0.5.3-0.5.5: queue length and merged tile copies (2026-10-13)
+
+- 0.5.3 (async submit) on the console: 0 drains, but still ~46-49 fps; the ring thread was "working" 21.6 ms per
+  21.7 ms frame and on the CPU only 68 % of it: it waited for room in the 1024-call queue (~1/5 of a frame's ~4,900
+  calls). 0.5.4: `usf4_deferred_slots_log2` (Switch 12 = 4096 calls, 512 KB): ~55.5 fps at CPU 2193 / GPU 998.4,
+  ~58.5-59 at CPU 2397 / GPU 921.6; queue full 0 times per 10 s once in the fight; all three cores ~100 %, GPU ~72 %.
+- New report line "deferred recording, meta-path calls": PC fight ~127 `vkCmdCopyImage` per frame with ~9.4 regions
+  each, almost all from `CopyTilesEDRAM4` (one region per 80x16 tile, two for depth). NVK records each colour region
+  through vk_meta (`copy_image_region_gfx`: pipeline, temporary views, descriptor set, rendering, draw), and the
+  command pool reset destroys the meta objects (`vk_meta_destroy_object`, `nvk_image_view_finish`, free/mutex:
+  ~12 % of the ring thread on the console, which now resets pools itself). 0.5.5 (`usf4_copy_tiles_merged`): tiles that
+  are neighbours in both images form one rectangle (row runs, then rows of the same span): 9.4 -> 2.5 regions per
+  call. Lockstep: differences only on the fighters' outlines (animation phase), none tile-shaped.
