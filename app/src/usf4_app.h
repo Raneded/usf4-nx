@@ -102,6 +102,8 @@ class Usf4App : public rex::ReXApp {
 
   // Test snapshots of the game image (usf4_snapshot_s), read from the presenter's guest output.
   void OnPostSetup() override {
+    // Every 10 s: how often each active enhancement was used (a log shows they really ran).
+    sa2::enh::StartReport();
     // Short video recordings of the game image (sa2_video_s; sa2-nx's recorder, lockstep with vblank_per_swap): raw
     // frames + a per-frame XXH3 of the full-resolution image, to compare two runs frame for frame.
     sa2::capture::Start([this]() -> rex::ui::Presenter* {

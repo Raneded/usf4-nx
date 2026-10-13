@@ -527,7 +527,7 @@ REXCVAR_DEFINE_BOOL(sa2_nvk_cache_per_stage, false, "SA2 renderer",
                     "NVK: per-stage shader cache keys (runtime disable_lto), so a VS or PS already compiled for "
                     "another pipeline is not compiled again; needs the patched driver");
 REXCVAR_DEFINE_STRING(sa2_diag_trace_tile, "", "SA2 renderer",
-                      "Diagnostic: physical EDRAM tile (0-2047) whose ownership/sync events are logged "
+                      "Diagnostic: physical EDRAM tile (0-4095, the mode-4 model) whose ownership/sync events are logged "
                       "(sets SA2_EDRAM_TRACE_TILE before the renderer starts)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sa2_native_normalized_remap, true, "SA2 renderer",

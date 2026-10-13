@@ -531,6 +531,15 @@ constexpr uint32_t kMaxTargetHeight = 2048;
 // once a frame and each rollover is a fenced SendWork (a full CPU <-> GPU drain plus an extra submission). The sets
 // are tiny (one or two image descriptors); the commands and their order are unchanged.
 constexpr uint32_t kConversionsEDRAMPerSlot = 2048;
+// usf4-nx: the mode-4 EDRAM model has 4096 tiles, twice the Xbox 360's 2048. A surface is still at most 2048 tiles;
+// the room past 2048 only matters when a surface would run past the end of the real EDRAM and wrap onto tile 0. The
+// one-tile scene (usf4_single_tile) does that: three 1280x720 surfaces (color 0, RT1, depth at 1472) need 2192 tiles,
+// so the depth's last 144 tiles wrapped onto color 0's first rows, and the two took those tiles from each other on
+// every draw (each change of owner ends the publish fast path for everyone: 30 M tiles walked per second on the
+// Switch, the ring thread's top cost). Without wrapping each keeps its own tiles; a game that fits in 2048 tiles
+// (USF4's three strips: 0..1918) sees no difference.
+constexpr uint32_t kTilesEDRAM4 = me::native::kOwnershipEdramTiles;
+constexpr uint32_t kMaskEDRAM4 = kTilesEDRAM4 - 1;
 constexpr VkImageSubresourceRange kRangeColor = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 constexpr VkImageSubresourceRange kRangeDepth = {
     VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1};
@@ -3667,7 +3676,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   static uint64_t SiteClear(const Image* drawn, uint32_t ordinal) {
     return (uint64_t(reinterpret_cast<uintptr_t>(drawn)) << 8) ^ ordinal;
   }
-  std::array<RedirectedStamp, 2048> edram4_stamps_{};
+  std::array<RedirectedStamp, kTilesEDRAM4> edram4_stamps_{};
   struct Consumer { Image* view = nullptr; uint32_t confidence = 0; };
   std::unordered_map<uint64_t, Consumer> edram4_consumer_;
   uint64_t edram4_consumer_uses_ = 0;
@@ -3739,12 +3748,12 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   bool SynchronizedEDRAM4(const Image& view, uint32_t physical, uint32_t version) const {
     if (!version || !REXCVAR_GET(sa2_native_edram4_cache_sync)) return false;
     const auto it = edram4_views_.find(&view);
-    return it != edram4_views_.end() && it->second[physical & 2047u] == version;
+    return it != edram4_views_.end() && it->second[physical & kMaskEDRAM4] == version;
   }
   void NoteSynchronizedEDRAM4(const Image& view, uint32_t physical, uint32_t version) {
     auto& versions = edram4_views_[&view];
-    if (versions.empty()) versions.assign(2048, 0);
-    versions[physical & 2047u] = version;
+    if (versions.empty()) versions.assign(kTilesEDRAM4, 0);
+    versions[physical & kMaskEDRAM4] = version;
   }
   void ForgetSynchronizedEDRAM4(const Image& view) {
     edram4_views_.erase(&view);
@@ -3833,13 +3842,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   bool StencilDeferredEDRAM4(const Image& view, uint32_t start, uint32_t count) const {
     const auto it = edram4_stencil_source_.find(&view);
     if (it == edram4_stencil_source_.end()) return false;
-    for (uint32_t i = 0; i < count; ++i) if (it->second[(start + i) & 2047u].image) return true;
+    for (uint32_t i = 0; i < count; ++i) if (it->second[(start + i) & kMaskEDRAM4].image) return true;
     return false;
   }
   void StencilRealEDRAM4(const Image& view, uint32_t start, uint32_t count) {
     const auto it = edram4_stencil_source_.find(&view);
     if (it == edram4_stencil_source_.end()) return;
-    for (uint32_t i = 0; i < count; ++i) it->second[(start + i) & 2047u] = {};
+    for (uint32_t i = 0; i < count; ++i) it->second[(start + i) & kMaskEDRAM4] = {};
   }
 
   struct ViewsDepthEDRAM {
@@ -4019,7 +4028,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
 
   void PublishRangeClearEDRAM4(Image& image, me::native::EdramRelativeSpan span) {
     for (uint32_t tile = span.start; tile < span.end(); ++tile) {
-      const uint32_t physical = (image.edram_base + tile) & 2047u;
+      const uint32_t physical = (image.edram_base + tile) & kMaskEDRAM4;
       if (physical == TraceTileEDRAM4() && TraceEventEDRAM4(physical)) {
         const auto old = owners_tiles_edram4_[physical];
         REXLOG_INFO("[native] EDRAM TILE TRACE clear-publish frame={} draw={} physical={} "
@@ -4028,7 +4037,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                     physical, TraceImageEDRAM4(old.image, old.tile_local),
                     TraceImageEDRAM4(&image, tile), span.start, span.end());
       }
-      owners_tiles_edram4_[(image.edram_base + tile) & 2047] = {&image, uint16_t(tile), ++edram4_version_};
+      owners_tiles_edram4_[(image.edram_base + tile) & kMaskEDRAM4] = {&image, uint16_t(tile), ++edram4_version_};
     }
     ++edram4_epoch_;
     // An EDRAM clear writes the whole 32-bit word: the stencil is real (known) again.
@@ -4067,9 +4076,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       if (!value || !*value) return UINT32_MAX;
       uint32_t tile = 0;
       for (const char* p = value; *p; ++p) {
-        if (*p < '0' || *p > '9' || tile > 2047u / 10u) return UINT32_MAX;
+        if (*p < '0' || *p > '9' || tile > kMaskEDRAM4 / 10u) return UINT32_MAX;
         tile = tile * 10u + uint32_t(*p - '0');
-        if (tile >= 2048) return UINT32_MAX;
+        if (tile >= kTilesEDRAM4) return UINT32_MAX;
       }
       return tile;
     }();
@@ -4123,7 +4132,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     for (uint32_t slot = 0; slot < 5; ++slot) {
       const Image* image = edram4_draw_images_[slot];
       if (!image) continue;
-      const uint32_t local = (physical - image->edram_base) & 2047u;
+      const uint32_t local = (physical - image->edram_base) & kMaskEDRAM4;
       if (local < edram4_draw_plan_.length_tiles[slot] &&
           TileUsedEDRAM4(*image, local, RasterArea(*image, edram4_draw_area_))) return true;
     }
@@ -4155,7 +4164,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     for (uint32_t ty = range.ty0; ty < range.ty1 && ty * range.pitch < tiles; ++ty)
     for (uint32_t tile = ty * range.pitch + range.tx0; tile < std::min(ty * range.pitch + range.tx1, tiles); ++tile) {
       {
-        const uint32_t physical = (image.edram_base + tile) & 2047u;
+        const uint32_t physical = (image.edram_base + tile) & kMaskEDRAM4;
         const auto old = owners_tiles_edram4_[physical];
         if (physical == trace_physical &&
             (old.image != &image || old.tile_local != tile) && TraceEventEDRAM4(physical)) {
@@ -4176,11 +4185,11 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                  (!old.image->edram_64bpp && (old.image->edram_format == 0 || old.image->edram_format == 2 ||
                                                old.image->edram_format == 3)))) {
               const auto previous = edram4_stencil_source_.find(old.image);
-              const SourceStencil f = previous != edram4_stencil_source_.end() && previous->second[old.tile_local & 2047u].image
-                  ? previous->second[old.tile_local & 2047u] : SourceStencil{old.image, uint16_t(old.tile_local & 2047u)};
+              const SourceStencil f = previous != edram4_stencil_source_.end() && previous->second[old.tile_local & kMaskEDRAM4].image
+                  ? previous->second[old.tile_local & kMaskEDRAM4] : SourceStencil{old.image, uint16_t(old.tile_local & kMaskEDRAM4)};
               auto& sources = StencilSourcesWrite(&image);
-              if (sources.empty()) sources.resize(2048);
-              sources[tile & 2047u] = f.image == &image && f.tile == (tile & 2047u) ? SourceStencil{} : f;
+              if (sources.empty()) sources.resize(kTilesEDRAM4);
+              sources[tile & kMaskEDRAM4] = f.image == &image && f.tile == (tile & kMaskEDRAM4) ? SourceStencil{} : f;
               ++edram4_stencil_inherited_;
             } else {
               StencilRealEDRAM4(image, tile, 1);
@@ -4231,7 +4240,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     // Validate ALL old owners and complete tile backing before recording any
     // canonical write. New/unowned tiles may be published from the drawn view.
     for (uint32_t tile = 0; tile < limit;) {
-      const auto owner = owners_tiles_edram4_[(drawn.edram_base + tile) & 2047u];
+      const auto owner = owners_tiles_edram4_[(drawn.edram_base + tile) & kMaskEDRAM4];
       if (!owner.image || owner.image == &drawn) { ++tile; continue; }
       Image& canonical = *owner.image;
       if (!canonical.edram_depth || canonical.edram_64bpp ||
@@ -4250,7 +4259,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         return FailureEDRAM4("canonical stencil clear exceeds depth backing", drawn, &canonical);
       uint32_t count = 1;
       while (tile + count < limit && (owner.tile_local % pitch) + count < pitch) {
-        const auto next = owners_tiles_edram4_[(drawn.edram_base + tile + count) & 2047u];
+        const auto next = owners_tiles_edram4_[(drawn.edram_base + tile + count) & kMaskEDRAM4];
         if (next.image != &canonical || next.tile_local != owner.tile_local + count) break;
         ++count;
       }
@@ -4277,7 +4286,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
           return FailureEDRAM4("canonical stencil-only attachment clear failed", drawn, &canonical);
         BarrierClearEDRAM4();
         const uint32_t physical = TraceTileEDRAM4();
-        const uint32_t local = (physical - drawn.edram_base) & 2047u;
+        const uint32_t local = (physical - drawn.edram_base) & kMaskEDRAM4;
         if (physical != UINT32_MAX && local >= region.first &&
             local - region.first < region.count && TraceEventEDRAM4(physical))
           REXLOG_INFO("[native] EDRAM TILE TRACE stencil-only-preserve frame={} draw={} physical={} "
@@ -4291,7 +4300,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     }
     StencilRealEDRAM4(drawn, 0, limit);
     for (uint32_t tile = 0; tile < limit; ++tile) {
-      auto& owner = owners_tiles_edram4_[(drawn.edram_base + tile) & 2047u];
+      auto& owner = owners_tiles_edram4_[(drawn.edram_base + tile) & kMaskEDRAM4];
       if (!owner.image) { owner = {&drawn, uint16_t(tile)}; ++edram4_epoch_; }
       owner.version = ++edram4_version_;  // the owner's stencil changed
     }
@@ -4318,7 +4327,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                            (16u >> target.edram_msaa_y);
     const uint32_t tiles = std::min({PitchTilesEDRAM(target) * rows, limit, 2048u});
     const uint32_t trace_physical = TraceTileEDRAM4();
-    const uint32_t trace_local = (trace_physical - target.edram_base) & 2047u;
+    const uint32_t trace_local = (trace_physical - target.edram_base) & kMaskEDRAM4;
     if (trace_physical != UINT32_MAX && trace_local >= start && trace_local < tiles &&
         owners_tiles_edram4_[trace_physical].image != &target &&
         TileUsedEDRAM4(target, trace_local, area) && TraceEventEDRAM4(trace_physical)) {
@@ -4353,7 +4362,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (it == edram4_views_.end()) return false;
         versions_target = &it->second;  // node-based map: stays valid while entries are added
       }
-      return (*versions_target)[physical & 2047u] == version;
+      return (*versions_target)[physical & kMaskEDRAM4] == version;
     };
     // Phase 1 collects the runs (tile-row pieces) to transfer; phase 2 records them.
     std::vector<SpanEDRAM4> spans;
@@ -4364,7 +4373,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     const uint32_t row_end = std::min(complete_width ? range.ty1 * range.pitch : ty * range.pitch + range.tx1,
                                        tiles);
     for (uint32_t tile = std::max(ty * range.pitch + range.tx0, start); tile < row_end;) {
-      const auto owner_state = owners_tiles_edram4_[(target.edram_base + tile) & 2047u];
+      const auto owner_state = owners_tiles_edram4_[(target.edram_base + tile) & kMaskEDRAM4];
       if (!owner_state.image || owner_state.image == &target) { ++tile; continue; }
       bool whole = false;
       if (!TileUsedEDRAM4(target, tile, area, &whole)) { ++tile; continue; }
@@ -4406,7 +4415,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       uint32_t count = 1;
       while (tile + count < row_end) {
         bool whole_next = false;
-        const auto next = owners_tiles_edram4_[(target.edram_base + tile + count) & 2047u];
+        const auto next = owners_tiles_edram4_[(target.edram_base + tile + count) & kMaskEDRAM4];
         const bool used = TileUsedEDRAM4(target, tile + count, area, &whole_next);
         if (clear_cutout) {
           whole_next = false;
@@ -4498,7 +4507,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       }
       spans.push_back({&source, owner_state.tile_local, tile, count, native_msaa_import});
       {
-        const RedirectedStamp& stamp = edram4_stamps_[(target.edram_base + tile) & 2047u];
+        const RedirectedStamp& stamp = edram4_stamps_[(target.edram_base + tile) & kMaskEDRAM4];
         if (stamp.site && stamp.version == owner_state.version) {
           Consumer& c = edram4_consumer_[stamp.site];
           c = c.view == &target ? Consumer{&target, std::min(c.confidence + 1, 8u)} : Consumer{&target, 1};
@@ -4574,10 +4583,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
             if (StencilDeferredEDRAM4(source, owner_state.tile_local, count)) {
               if (target.edram4_usa_stencil) ++edram4_stencil_inexact_;
               auto& sources = StencilSourcesWrite(&target);
-              if (sources.empty()) sources.resize(2048);
+              if (sources.empty()) sources.resize(kTilesEDRAM4);
               const auto& de = edram4_stencil_source_[&source];
               for (uint32_t i = 0; i < count; ++i)
-                sources[(tile + i) & 2047u] = de[(owner_state.tile_local + i) & 2047u];
+                sources[(tile + i) & kMaskEDRAM4] = de[(owner_state.tile_local + i) & kMaskEDRAM4];
             } else {
               StencilRealEDRAM4(target, tile, count);
             }
@@ -4613,14 +4622,14 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                       target.edram_msaa_y, target.edram_depth, source.edram_base, source.edram_msaa_x,
                       source.edram_msaa_y, source.edram_depth, count);
         for (uint32_t i = 0; i < count; ++i) {
-          const uint32_t physical = (target.edram_base + tile + i) & 2047u;
+          const uint32_t physical = (target.edram_base + tile + i) & kMaskEDRAM4;
           NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
         }
         continue;
       }
       if (!success) return finish_batch(FailureEDRAM4("physical transfer unsupported or failed", target, &source));
       for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t physical = (target.edram_base + tile + i) & 2047u;
+        const uint32_t physical = (target.edram_base + tile + i) & kMaskEDRAM4;
         NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
         if (owners_tiles_edram4_[physical].image) owners_tiles_edram4_[physical].image->edram4_exported = true;
       }
@@ -4772,7 +4781,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   template <typename ColorFor, typename Region>
   bool PartialEDRAM4(Image& drawn, uint32_t local, uint32_t px0, uint32_t px1, uint32_t py0, uint32_t py1,
                      const ColorFor& color_for, Region& region) {
-    const auto owner = owners_tiles_edram4_[(drawn.edram_base + local) & 2047u];
+    const auto owner = owners_tiles_edram4_[(drawn.edram_base + local) & kMaskEDRAM4];
     Image* w = owner.image ? owner.image : nullptr;
     if (!w || w->guest_width || w->guest_height || w->raster_grid_x || !w->prepared || w->invalid_content ||
         w->edram_64bpp || !SamplesSupported(*w)) return false;
@@ -4952,7 +4961,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                               ? alias_it->second : nullptr;
     struct Goal { Image* w; uint32_t local; bool reassign; };
     const auto goal = [&](uint32_t local) -> Goal {
-      const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & 2047u];
+      const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & kMaskEDRAM4];
       // A depth owner with the same encoding is cleared in place. Any other owner (a color view, a different
       // encoding) hands the tile to the 1x alias: the clear writes all of its depth, and the lazy-stencil
       // record keeps pointing at the old owner's bits (a depth-only clear leaves them in EDRAM).
@@ -4991,7 +5000,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         for (uint32_t ty = uint32_t(o[1]) / th; direct && ty < ty_end; ++ty) {
           for (uint32_t tx = uint32_t(o[0]) / tw; tx < tx_end;) {
             const uint32_t local = ty * pitch_tiles + tx;
-            const uint32_t lc = (drawn->edram_base + local - c->edram_base) & 2047u;
+            const uint32_t lc = (drawn->edram_base + local - c->edram_base) & kMaskEDRAM4;
             uint32_t count = 1;
             while (tx + count < tx_end && (lc % cp) + count < cp) ++count;
             const uint32_t x = (lc % cp) * cw, y = (lc / cp) * ch, width = cw * count;
@@ -5127,10 +5136,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       Image& w = *region.owner;
       if (!w.edram_depth) {
         for (uint32_t i = 0; i < region.count; ++i) {
-          const uint32_t physical = (drawn->edram_base + region.first_local + i) & 2047u;
+          const uint32_t physical = (drawn->edram_base + region.first_local + i) & kMaskEDRAM4;
           auto& d = owners_tiles_edram4_[physical];
           if (region.reassign) {
-            d = {&w, uint16_t((region.owner_local + i) & 2047u), 0};
+            d = {&w, uint16_t((region.owner_local + i) & kMaskEDRAM4), 0};
             ++edram4_epoch_;
           }
           d.version = ++edram4_version_;
@@ -5141,23 +5150,23 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       }
       if (stencil_value >= 0) w.edram4_bits_stencil |= uint8_t(stencil_value);
       for (uint32_t i = 0; i < region.count; ++i) {
-        auto& d = owners_tiles_edram4_[(drawn->edram_base + region.first_local + i) & 2047u];
+        auto& d = owners_tiles_edram4_[(drawn->edram_base + region.first_local + i) & kMaskEDRAM4];
         if (region.reassign) {
-          const uint32_t local = (region.owner_local + i) & 2047u;  // the new owner's own tile index
+          const uint32_t local = (region.owner_local + i) & kMaskEDRAM4;  // the new owner's own tile index
           if (stencil_value < 0 && REXCVAR_GET(sa2_native_edram4_stencil_lazy) && d.image &&
               d.image != &w) {
             const auto previous = edram4_stencil_source_.find(d.image);
-            const SourceStencil f = previous != edram4_stencil_source_.end() && previous->second[d.tile_local & 2047u].image
-                ? previous->second[d.tile_local & 2047u] : SourceStencil{d.image, uint16_t(d.tile_local & 2047u)};
+            const SourceStencil f = previous != edram4_stencil_source_.end() && previous->second[d.tile_local & kMaskEDRAM4].image
+                ? previous->second[d.tile_local & kMaskEDRAM4] : SourceStencil{d.image, uint16_t(d.tile_local & kMaskEDRAM4)};
             auto& sources = StencilSourcesWrite(&w);
-            if (sources.empty()) sources.resize(2048);
+            if (sources.empty()) sources.resize(kTilesEDRAM4);
             sources[local] = f.image == &w && f.tile == local ? SourceStencil{} : f;
           }
           d = {&w, uint16_t(local), 0};
           ++edram4_epoch_;
         }
         d.version = ++edram4_version_;
-        edram4_stamps_[(drawn->edram_base + region.first_local + i) & 2047u] = {site, d.version};
+        edram4_stamps_[(drawn->edram_base + region.first_local + i) & kMaskEDRAM4] = {site, d.version};
       }
       if (stencil_value >= 0) StencilRealEDRAM4(w, region.owner_local, region.count);  // both aspects written
       edram4_redirected_tiles_ += region.count;
@@ -5246,7 +5255,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
       for (uint32_t tx = uint32_t(o[0]) / tw; tx < uint32_t(o[2]) / tw;) {
         const uint32_t local = ty * pitch_tiles + tx;
-        const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & 2047u];
+        const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & kMaskEDRAM4];
         Image* w = owner.image;
         const bool depth_owner = w && w != drawn && w->image != drawn->image && w->edram_depth &&
             REXCVAR_GET(usf4_edram4_clear_into_depth) && !w->edram_64bpp &&
@@ -5273,7 +5282,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (!wp || w->width % ww) return plan_no("owner width not tile-aligned");
         uint32_t count = 1;
         while (tx + count < uint32_t(o[2]) / tw && (owner.tile_local % wp) + count < wp) {
-          const auto next = owners_tiles_edram4_[(drawn->edram_base + local + count) & 2047u];
+          const auto next = owners_tiles_edram4_[(drawn->edram_base + local + count) & kMaskEDRAM4];
           if (next.image != w || next.tile_local != owner.tile_local + count) break;
           ++count;
         }
@@ -5317,7 +5326,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
       for (uint32_t tx = uint32_t(o[0]) / tw; tx < tx_end;) {
         const uint32_t local = ty * pitch_tiles + tx;
-        const uint32_t lc = (drawn.edram_base + local - c->edram_base) & 2047u;
+        const uint32_t lc = (drawn.edram_base + local - c->edram_base) & kMaskEDRAM4;
         uint32_t count = 1;
         while (tx + count < tx_end && (lc % cp) + count < cp) ++count;
         const uint32_t x = (lc % cp) * cw, y = (lc / cp) * ch, width = cw * count;
@@ -5375,10 +5384,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     BarrierClearEDRAM4();
     for (const auto& run : plan.runs) {
       for (uint32_t i = 0; i < run.count; ++i) {
-        const uint32_t physical = (plan.drawn->edram_base + run.first_local + i) & 2047u;
+        const uint32_t physical = (plan.drawn->edram_base + run.first_local + i) & kMaskEDRAM4;
         auto& d = owners_tiles_edram4_[physical];
         if (run.reassign) {  // usf4-nx: the consumer takes the tile (the clear wrote all of its word)
-          d = {run.owner, uint16_t((run.owner_local + i) & 2047u), 0};
+          d = {run.owner, uint16_t((run.owner_local + i) & kMaskEDRAM4), 0};
           ++edram4_epoch_;
         }
         d.version = ++edram4_version_;
@@ -5436,7 +5445,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     for (uint32_t ty = uint32_t(o[1]) / th; ty < uint32_t(o[3]) / th; ++ty) {
       for (uint32_t tx = uint32_t(o[0]) / tw; tx < uint32_t(o[2]) / tw;) {
         const uint32_t local = ty * pitch_tiles + tx;
-        const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & 2047u];
+        const auto owner = owners_tiles_edram4_[(drawn->edram_base + local) & kMaskEDRAM4];
         Image* w = owner.image;
         // Only another single-sample depth view can take the clear (the drawn view itself, a color owner or
         // no owner: draw it literally).
@@ -5455,7 +5464,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (!wp || w->width % ww) { ++edram4_stencil_redirected_no_; return false; }
         uint32_t count = 1;
         while (tx + count < uint32_t(o[2]) / tw && (owner.tile_local % wp) + count < wp) {
-          const auto n = owners_tiles_edram4_[(drawn->edram_base + local + count) & 2047u];
+          const auto n = owners_tiles_edram4_[(drawn->edram_base + local + count) & kMaskEDRAM4];
           if (n.image != w || n.tile_local != owner.tile_local + count) break;
           ++count;
         }
@@ -5484,7 +5493,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       StencilRealEDRAM4(w, region.owner_local, region.count);
       w.edram4_bits_stencil |= uint8_t(value);
       for (uint32_t i = 0; i < region.count; ++i)
-        owners_tiles_edram4_[(drawn->edram_base + region.first_local + i) & 2047u].version = ++edram4_version_;
+        owners_tiles_edram4_[(drawn->edram_base + region.first_local + i) & kMaskEDRAM4].version = ++edram4_version_;
       edram4_stencil_redirected_tiles_ += region.count;
     }
     ++edram4_stencil_redirected_;
@@ -5498,17 +5507,17 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     const auto it = edram4_stencil_source_.find(&view);
     if (it == edram4_stencil_source_.end()) return true;
     for (uint32_t i = 0; i < count;) {
-      const SourceStencil f = it->second[(start + i) & 2047u];
+      const SourceStencil f = it->second[(start + i) & kMaskEDRAM4];
       if (!f.image) { ++i; continue; }
       uint32_t n = 1;
       while (i + n < count) {
-        const SourceStencil g = it->second[(start + i + n) & 2047u];
-        if (g.image != f.image || g.tile != ((f.tile + n) & 2047u)) break;
+        const SourceStencil g = it->second[(start + i + n) & kMaskEDRAM4];
+        if (g.image != f.image || g.tile != ((f.tile + n) & kMaskEDRAM4)) break;
         ++n;
       }
       Image& src_data = *const_cast<Image*>(f.image);
       edram4_import_stencil_only_ = true;
-      const bool ok = src_data.prepared && ImportColorDepthEDRAM4(src_data, view, f.tile, (start + i) & 2047u, n);
+      const bool ok = src_data.prepared && ImportColorDepthEDRAM4(src_data, view, f.tile, (start + i) & kMaskEDRAM4, n);
       edram4_import_stencil_only_ = false;
       if (!ok) return FailureEDRAM4("deferred stencil fetch failed", view, &src_data);
       StencilRealEDRAM4(view, start + i, n);
@@ -6904,7 +6913,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     } else if (REXCVAR_GET(sa2_native_edram4_stencil_lazy)) {
       const auto source_source = edram4_stencil_source_.find(&source);
       const auto source_for = [&](uint32_t i) -> SourceStencil {
-        const uint32_t local = (source_start + i) & 2047u;
+        const uint32_t local = (source_start + i) & kMaskEDRAM4;
         if (source_source != edram4_stencil_source_.end() && source_source->second[local].image)
           return source_source->second[local];
         return {&source, uint16_t(local)};
@@ -6924,15 +6933,15 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         // explicit late stencil fetch: no decision here
       } else if (!target.edram4_usa_stencil || draw_no_stencil) {
         auto& sources = StencilSourcesWrite(&target);
-        if (sources.empty()) sources.resize(2048);
-        for (uint32_t i = 0; i < count; ++i) sources[(target_start + i) & 2047u] = source_for(i);
+        if (sources.empty()) sources.resize(kTilesEDRAM4);
+        for (uint32_t i = 0; i < count; ++i) sources[(target_start + i) & kMaskEDRAM4] = source_for(i);
         steps = 1;
         ++edram4_stencil_skipped_;
       } else if (StencilDeferredEDRAM4(source, source_start, count)) {
         bool own = true;
         for (uint32_t i = 0; i < count && own; ++i) {
           const SourceStencil f = source_for(i);
-          own = f.image == &target && f.tile == ((target_start + i) & 2047u);
+          own = f.image == &target && f.tile == ((target_start + i) & kMaskEDRAM4);
         }
         if (own) {
           steps = 1;
@@ -10586,7 +10595,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   std::unordered_map<uint64_t, Image> targets_;
   std::unordered_map<uint64_t, Image*> targets_color_active_;
   std::array<OwnerTileEDRAM, xenos::kEdramTileCount> owners_tiles_edram_{};
-  std::array<OwnerTileEDRAM, xenos::kEdramTileCount> owners_tiles_edram4_{};
+  std::array<OwnerTileEDRAM, kTilesEDRAM4> owners_tiles_edram4_{};
   std::unordered_map<VkImage, ViewsDepthEDRAM> views_depth_edram_;
   std::unordered_map<uint64_t, PassImportDepthEDRAM> passes_import_depth_edram_;
   std::unordered_map<VkImage, VkFramebuffer> framebuffers_import_depth_edram_;

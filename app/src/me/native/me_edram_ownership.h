@@ -32,7 +32,9 @@
 
 namespace me::native {
 
-inline constexpr uint32_t kOwnershipEdramTiles = 2048;
+// usf4-nx: 4096, twice the Xbox 360's 2048 tiles, so surfaces that run past tile 2048 (USF4's one-tile scene) do not
+// wrap onto tile 0 (sa2_native_targets.cpp, kTilesEDRAM4).
+inline constexpr uint32_t kOwnershipEdramTiles = 4096;
 
 // CPU-only extraction of ReXGlue/Xenia RenderTargetCache::Update's bound-range
 // planning (pipeline/render_target/cache.cpp). This is not an ownership map or
@@ -154,7 +156,7 @@ constexpr bool SameBoundPlan(const EdramBoundPlan& a, const EdramBoundPlan& b) {
 
 struct EdramPhysicalSpan {
   uint32_t start = 0;
-  uint32_t end = 0;  // exclusive physical tile; may equal 2048
+  uint32_t end = 0;  // exclusive physical tile; may equal kOwnershipEdramTiles
 };
 
 struct EdramWrappedRange {
@@ -238,8 +240,8 @@ constexpr EdramClearPlan PlanEdramClearRanges(const EdramClearRequest& request) 
     result.color.length = cap(end32 << uint32_t(request.color_wide)) - result.color.start;
   }
   if (result.depth.length && result.color.length) {
-    const uint32_t ds = (request.depth_base + result.depth.start) & 2047u;
-    const uint32_t cs = (request.color_base + result.color.start) & 2047u;
+    const uint32_t ds = (request.depth_base + result.depth.start) & (kOwnershipEdramTiles - 1);
+    const uint32_t cs = (request.color_base + result.color.start) & (kOwnershipEdramTiles - 1);
     const uint32_t depth_distance = (cs < ds ? kOwnershipEdramTiles : 0) + cs - ds;
     const uint32_t color_distance = (ds < cs ? kOwnershipEdramTiles : 0) + ds - cs;
     if (result.depth.length > depth_distance) result.depth.length = depth_distance;

@@ -470,3 +470,30 @@ PC results (Training fight, 150 frames each): draws per frame 394 -> 202 (-49 %)
 per 10 s; colour alias operations 11,097 -> 0, depth exports 15,898 -> 976, depth imports 40,497 -> 19,983.
 Lockstep image A/B (frames 7000-7119): no offset (best alignment 0,0), MAD 3.45 spread evenly: edges are a little
 harder, because the 3-strip path's 2x MSAA did smooth them. GPU time can only be judged on the console.
+
+## 0.5.0 on the console: the EDRAM wrap was the cost (2026-10-13)
+
+0.5.0 with the one tile: GPU load down, but fights at 28-33 fps (CPU 2091, GPU 768 that day). The ring thread was
+82 % busy, half of it in `PublishEDRAM4` and the lazy-stencil map lookups it makes: 30 M EDRAM tiles walked per second,
+publish fast path 8 % (three strips: 0.36 M tiles, 95 %). The depth's last 144 tiles wrapped onto colour 0's first
+rows (above), so the two took those tiles from each other on every draw, and each change of owner bumps the global
+epoch that the fast path needs. Fix (0.5.1): the mode-4 EDRAM model has 4096 tiles (`kTilesEDRAM4` in
+`sa2_native_targets.cpp`, `kOwnershipEdramTiles` in `me_edram_ownership.h`); a surface is still at most 2048 tiles,
+the three strips (0..1918) never reach past 2048. PC one-tile fight: publish 34.2 M -> 1.8 M tiles per 10 s, sync
+21.7 M -> 2.1 M.
+
+0.5.1 on the console, one tile, CPU 2193 / GPU 998.4: **~52 fps in fights** (Status Monitor: GPU 67 %, cores 0-2
+85-95 %). The limit is now the three CPU cores together: main thread 70 % (22 % of it the D3D spin wait), Vulkan
+recording worker 68 % (NVK: `vk_dynamic_graphics_state_copy` 11 %, `nvk_CmdBeginRendering` 7 %, inline data 7 %), ring
+thread 65 % (waits 2.8 s per 10 s for the worker in drains), game audio thread 21 %, four job workers 10 % each.
+Ring per draw: uploads 5.3 us (VS constants re-uploaded 137,695 times per 10 s, all with new contents), textures
+2.2 us, vertices/targets 2.3 us, pipeline 1.4 us, record 1.2 us.
+
+## The D3D GPU wait sleeps (`usf4_cpu_gpu_wait_sleep`, 2026-10-13)
+
+`src/usf4_gpu_wait.cpp`: sa2-nx's `sa2_gpu_wait.cpp` on USF4's copy of the XDK iteration function `sub_821F54E0`
+(same record and device offsets: [0] device, [8] read pointer seen, [12] tick; device +11024 read-pointer word,
++11069 bit 0x02 hung; code hash checked, FNV 0x142E8261D1F076A1 over 0xD8 bytes). It sleeps until the ring thread
+reports progress (at most `usf4_gpu_wait_max_us`, 1000) only when nothing can have changed since the previous
+iteration. PC fight: ~8,000 sleeps and ~8.5 s asleep per 10 s on the main thread instead of spinning. The enhancement
+use report (`[enh] uses in the last 10 s`) was not started in USF4; `usf4_app.h` now starts it.
