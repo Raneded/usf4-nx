@@ -5,9 +5,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <exception>
+#include <functional>
 #include <cstring>
 #include <mutex>
 #include <new>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
@@ -61,6 +63,13 @@ REXCVAR_DEFINE_BOOL(sa2_deferred_native_update, false, "SA2 renderer",
                     "drains first")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(usf4_deferred_async_submit, false, "SA2 renderer",
+                    "usf4-nx: the end of the frame does not wait for the recording worker: the work submission and the "
+                    "output paint run on the worker, in queue order, and reusing a slot waits only until the worker "
+                    "has passed that slot's submission (its ticket). The ring thread starts the next frame while the "
+                    "worker records the end of the previous one. Same commands, same order")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace sa2::native::deferred {
 namespace {
 
@@ -95,8 +104,26 @@ thread_local bool t_producer = false;  // not std::thread::id: SDK threads are n
 constexpr size_t kArena = size_t(512) << 10;
 uint8_t* g_arena = nullptr;
 size_t g_arena_usage = 0;
+// usf4-nx: the arena as a ring. With usf4_deferred_async_submit the queue rarely empties (the frame's submission no
+// longer drains it), so space is given back as the worker passes the calls that used it: one marker per call with
+// arrays (its queue index and where its block ends). g_arena_usage is unused then.
+bool g_arena_ring = false;
+uint64_t g_arena_head = 0, g_arena_tail = 0;  // virtual offsets (mod kArena)
+struct ArenaMark { uint64_t index, end; };
+ArenaMark* g_arena_marks = nullptr;  // kSlots entries: at most one per queued call
+uint64_t g_marks_first = 0, g_marks_end = 0;
+uint64_t g_arena_waits = 0;
 
-// Report.
+// Report. usf4-nx: drains by cause (the call that needed the worker to finish), with their waits.
+struct DrainCause { const char* what = nullptr; uint64_t drains = 0, waits = 0, ns = 0; };
+DrainCause g_causes[32];
+DrainCause& Cause(const char* what) {
+  for (DrainCause& c : g_causes) {
+    if (c.what == what) return c;
+    if (!c.what) { c.what = what; return c; }
+  }
+  return g_causes[31];
+}
 uint64_t g_queued = 0, g_direct = 0, g_drains = 0, g_drains_with_wait = 0, g_ns_wait = 0;
 auto g_report = std::chrono::steady_clock::now();
 
@@ -208,7 +235,9 @@ void Worker() {
   }
 }
 
-void DrainInternal() {
+void Report();
+
+void DrainInternal(const char* cause) {
   static uint32_t traces = 0;
   if (traces < 6) {
     ++traces;
@@ -225,13 +254,26 @@ void DrainInternal() {
       if (laps < 32) std::this_thread::yield();
       else ShortPause(std::chrono::microseconds(20));
     }
-    g_ns_wait += uint64_t(
+    const uint64_t ns = uint64_t(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    g_ns_wait += ns;
     ++g_drains_with_wait;
+    DrainCause& c = Cause(cause);
+    ++c.waits;
+    c.ns += ns;
   }
   ++g_drains;
+  ++Cause(cause).drains;
   g_read_view = g_written_producer;  // the queue is empty (the worker has executed everything)
   g_arena_usage = 0;
+  g_arena_tail = g_arena_head;
+  g_marks_first = g_marks_end;
+  Report();
+}
+
+// Every 10 s, from the ring thread (drains, and Flush after each ring segment: with usf4_deferred_async_submit
+// there may be no drain for minutes).
+void Report() {
   const auto now = std::chrono::steady_clock::now();
   if (now - g_report >= std::chrono::seconds(10)) {
     g_report = now;
@@ -240,16 +282,61 @@ void DrainInternal() {
                 "{} queued, {} direct",
                 g_queued, g_direct, g_drains, g_drains_with_wait, double(g_ns_wait) / 1e6, g_batches,
                 g_updates, g_direct_updates);
+    std::string causes;
+    for (DrainCause& c : g_causes) {
+      if (!c.what || !c.drains) continue;
+      causes += fmt::format(" {} {} ({} waited, {:.1f} ms);", c.what, c.drains, c.waits, double(c.ns) / 1e6);
+      c.drains = c.waits = c.ns = 0;
+    }
+    REXLOG_INFO("[native] deferred recording drains by cause (10 s):{} arena waits (ring) {}", causes,
+                g_arena_waits);
+    g_arena_waits = 0;
     g_queued = g_direct = g_drains = g_drains_with_wait = g_ns_wait = 0;
     g_batches = g_updates = g_direct_updates = 0;
   }
 }
 
 // One arena block for all arrays of one call (a drain inside would reuse memory already copied for it).
+void ArenaRelease() {
+  const uint64_t read = g_read.load(std::memory_order_acquire);
+  while (g_marks_first != g_marks_end && g_arena_marks[g_marks_first % kSlots].index < read) {
+    g_arena_tail = g_arena_marks[g_marks_first % kSlots].end;
+    ++g_marks_first;
+  }
+  if (g_marks_first == g_marks_end && read == g_written_producer) g_arena_tail = g_arena_head;
+}
+
+uint8_t* ArenaRing(size_t bytes) {
+  // A block never wraps: when it does not fit before the end, the rest of the lap is skipped.
+  const auto fits = [&] {
+    const uint64_t at = g_arena_head % kArena;
+    const uint64_t need = at + bytes > kArena ? (kArena - at) + bytes : bytes;
+    return g_arena_head + need - g_arena_tail <= kArena;
+  };
+  ArenaRelease();
+  if (!fits()) {
+    ++g_arena_waits;
+    if (g_fast && g_published != g_written_producer) PublishAlready();
+    for (uint32_t laps = 0; ArenaRelease(), !fits(); ++laps) {
+      Wake();
+      if (laps < 32) std::this_thread::yield();
+      else ShortPause(std::chrono::microseconds(20));
+    }
+  }
+  if (g_arena_head % kArena + bytes > kArena) g_arena_head += kArena - g_arena_head % kArena;
+  uint8_t* p = g_arena + g_arena_head % kArena;
+  g_arena_head += bytes;
+  // The call that uses this block is the next one queued (index g_written_producer).
+  g_arena_marks[g_marks_end % kSlots] = {g_written_producer, g_arena_head};
+  ++g_marks_end;
+  return p;
+}
+
 uint8_t* Arena(size_t bytes) {
   bytes = (bytes + 15) & ~size_t(15);
   if (bytes > kArena) return nullptr;
-  if (g_arena_usage + bytes > kArena) DrainInternal();
+  if (g_arena_ring) return ArenaRing(bytes);
+  if (g_arena_usage + bytes > kArena) DrainInternal("arena full");
   uint8_t* p = g_arena + g_arena_usage;
   g_arena_usage += bytes;
   return p;
@@ -311,6 +398,7 @@ struct Wrapper<Id, R (*)(A...)> {
   static constexpr bool kDeferrable = std::is_void_v<R> && !(kPointerData<A> || ...);
   static inline Pointer real = nullptr;
   static inline uint8_t mode = kDirect;
+  static inline const char* name = "?";
   static R F(A... a) {
     if (IsProducer()) {
       if constexpr (kDeferrable) {
@@ -320,7 +408,7 @@ struct Wrapper<Id, R (*)(A...)> {
         }
       }
       if (mode != kDirect) {
-        DrainInternal();
+        DrainInternal(name);
         ++g_direct;
       }
     }
@@ -345,6 +433,7 @@ void Install(PFN real, PFN& target, const char* name) {
   using E = Wrapper<Id, PFN>;
   if (!real) return;
   E::real = real;
+  E::name = name;
   E::mode = Classify(name, E::kDeferrable);
   if (E::mode != kDirect) target = &E::F;
 }
@@ -393,7 +482,7 @@ VkResult BeginCommands(VkCommandBuffer cb, const VkCommandBufferBeginInfo* info)
       REXLOG_ERROR("[native] deferred recording DISABLED: could not create the worker");
     }
   }
-  if (IsProducer()) DrainInternal();
+  if (IsProducer()) DrainInternal("vkBeginCommandBuffer");
   return g_real.vkBeginCommandBuffer(cb, info);
 }
 
@@ -401,7 +490,7 @@ void Barrier(VkCommandBuffer cb, VkPipelineStageFlags s, VkPipelineStageFlags d,
              const VkMemoryBarrier* m, uint32_t nb, const VkBufferMemoryBarrier* b, uint32_t ni,
              const VkImageMemoryBarrier* im) {
   if (!IsProducer() || WithPNext(m, nm) || WithPNext(b, nb) || WithPNext(im, ni)) {
-    if (IsProducer()) { DrainInternal(); ++g_direct; }
+    if (IsProducer()) { DrainInternal("vkCmdPipelineBarrier with pNext"); ++g_direct; }
     g_real.vkCmdPipelineBarrier(cb, s, d, f, nm, m, nb, b, ni, im);
     return;
   }
@@ -431,7 +520,7 @@ void Constants(VkCommandBuffer cb, VkPipelineLayout l, VkShaderStageFlags st, ui
 
 void BeginPass(VkCommandBuffer cb, const VkRenderPassBeginInfo* info, VkSubpassContents content) {
   if (!IsProducer() || info->pNext) {
-    if (IsProducer()) { DrainInternal(); ++g_direct; }
+    if (IsProducer()) { DrainInternal("vkCmdBeginRenderPass with pNext"); ++g_direct; }
     return g_real.vkCmdBeginRenderPass(cb, info, content);
   }
   uint8_t* c = Arena(Size<VkRenderPassBeginInfo>(1) + Size<VkClearValue>(info->clearValueCount));
@@ -539,7 +628,7 @@ void UpdateSets(VkDevice vulkan_device, uint32_t nw, const VkWriteDescriptorSet*
   for (uint32_t i = 0; i < nc && simple; ++i)
     if (c[i].pNext) simple = false;
   if (!simple || bytes > (size_t(64) << 10)) {
-    DrainInternal();
+    DrainInternal("vkUpdateDescriptorSets (not queueable)");
     ++g_direct;
     ++g_direct_updates;
     return g_real.vkUpdateDescriptorSets(vulkan_device, nw, w, nc, c);
@@ -628,7 +717,7 @@ void Mask(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkColorComponent
 }
 void Label(VkCommandBuffer cb, const VkDebugUtilsLabelEXT* e) {
   if (!IsProducer() || e->pNext) {
-    if (IsProducer()) { DrainInternal(); ++g_direct; }
+    if (IsProducer()) { DrainInternal("debug label with pNext"); ++g_direct; }
     return g_label(cb, e);
   }
   const size_t long_value = e->pLabelName ? std::strlen(e->pLabelName) + 1 : 0;
@@ -642,6 +731,7 @@ template <size_t Id, typename PFN>
 PFN_vkVoidFunction Generic(PFN_vkVoidFunction real) {
   using E = Wrapper<Id, PFN>;
   E::real = reinterpret_cast<PFN>(real);
+  E::name = "generic by name";
   E::mode = E::kDeferrable ? kDefer : kDrain;
   return reinterpret_cast<PFN_vkVoidFunction>(&E::F);
 }
@@ -690,7 +780,9 @@ const Functions& Table(const Functions& real_fns) {
     g_batch = g_fast ? uint32_t(REXCVAR_GET(sa2_deferred_native_batch)) : 1;
     g_queue = new (std::nothrow) Slot[kSlots];
     g_arena = new (std::nothrow) uint8_t[kArena];
-    if (!g_queue || !g_arena) {
+    g_arena_ring = REXCVAR_GET(usf4_deferred_async_submit);
+    if (g_arena_ring) g_arena_marks = new (std::nothrow) ArenaMark[kSlots];
+    if (!g_queue || !g_arena || (g_arena_ring && !g_arena_marks)) {
       REXLOG_ERROR("[native] deferred recording DISABLED: out of memory for the queue ({} KB)",
                    (sizeof(Slot) * kSlots + kArena) / 1024);
       return false;
@@ -741,11 +833,49 @@ PFN_vkVoidFunction Proc(PFN_vkGetDeviceProcAddr real, VkDevice device, const cha
 }
 
 void Drain() {
-  if (IsProducer()) DrainInternal();
+  if (IsProducer()) DrainInternal("Drain()");
 }
 
 void Flush() {
   if (g_fast && g_published != g_written_producer && IsProducer()) PublishAlready();
+  if (IsProducer()) Report();
+}
+
+bool AsyncSubmit() {
+  static const bool on = REXCVAR_GET(usf4_deferred_async_submit);
+  return on && IsProducer();
+}
+
+const Functions& Real() { return g_real; }
+
+uint64_t RunOnWorker(std::function<void()>* job) {
+  if (!IsProducer()) {
+    (*job)();
+    delete job;
+    return 0;
+  }
+  Enqueue(+[](std::function<void()>* j) {
+    (*j)();
+    delete j;
+  }, job);
+  PublishAlready();  // the worker should not wait for the next batch
+  return g_written_producer;
+}
+
+void WaitTicket(uint64_t ticket) {
+  if (!IsProducer() || !ticket) return;
+  if (g_read.load(std::memory_order_acquire) >= ticket) return;
+  if (g_fast && g_published < ticket) PublishAlready();
+  const auto t0 = std::chrono::steady_clock::now();
+  Wake();
+  for (uint32_t laps = 0; g_read.load(std::memory_order_acquire) < ticket; ++laps) {
+    if (laps < 32) std::this_thread::yield();
+    else ShortPause(std::chrono::microseconds(20));
+  }
+  DrainCause& c = Cause("ticket");
+  ++c.drains;
+  ++c.waits;
+  c.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
 }
 
 }  // namespace sa2::native::deferred

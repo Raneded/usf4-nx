@@ -711,6 +711,8 @@ struct SlotWork {
   VkCommandBuffer work = VK_NULL_HANDLE;
   VkCommandBuffer upload = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
+  // usf4_deferred_async_submit: the worker queue position of this slot's last submission (0 = submitted directly).
+  uint64_t ticket = 0;
   // Descriptor sets for typeless EDRAM conversions are reset only after this
   // slot's fence, so every dispatch keeps the views recorded with it.
   VkDescriptorPool pool_conversion_edram = VK_NULL_HANDLE;
@@ -1201,8 +1203,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       ifn.vkGetPhysicalDeviceProperties(vulkan_device_->physical_device(), &physical);
       write_mark_ = reinterpret_cast<FnWriteMark>(
           deferred::Proc(ifn.vkGetDeviceProcAddr, device_, "vkCmdWriteTimestamp"));
-      read_queries_ = reinterpret_cast<FnReadQueries>(
-          deferred::Proc(ifn.vkGetDeviceProcAddr, device_, "vkGetQueryPoolResults"));
+      // usf4-nx: not through the deferred proxy (it drained the worker on every read). Every read is in CompleteA,
+      // after the slot's fence: the submission, and so every command that wrote the queries, has been recorded.
+      read_queries_ = reinterpret_cast<FnReadQueries>(ifn.vkGetDeviceProcAddr(device_, "vkGetQueryPoolResults"));
       if (family_ < families && queues[family_].timestampValidBits && write_mark_ &&
           read_queries_ && physical.limits.timestampPeriod > 0.0f) {
         VkQueryPoolCreateInfo info_queries{};
@@ -2677,6 +2680,25 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     const uint32_t host_w = std::min<uint32_t>(ScaleSize(w, painted_image.scale_q), HostWidth(painted_image));
     const uint32_t host_h = std::min<uint32_t>(ScaleSize(h, painted_image.scale_q), HostHeight(painted_image));
     bool painted = false;
+    if (deferred::AsyncSubmit()) {
+      // usf4_deferred_async_submit: the output is painted and handed to the presenter on the worker, after the
+      // frame's commands and its submission (queue order), so the presenter never sees an output whose work has not
+      // been submitted yet. The job keeps its own copy of the source (PaintOutput reads its view and size); destroying
+      // that image drains the worker first, so the view outlives the job.
+      Image source_copy = painted_image;
+      const bool from_target = source_front != nullptr;
+      deferred::RunOnWorker(new std::function<void()>([this, presenter, source_copy, host_w, host_h,
+                                                       from_target]() mutable {
+        presenter->RefreshGuestOutput(
+            host_w, host_h, 1280, 720, [&](rex::ui::Presenter::GuestOutputRefreshContext& base_context) {
+              auto& context = static_cast<VulkanPresenter::VulkanGuestOutputRefreshContext&>(base_context);
+              return PaintOutput(context, source_copy, host_w, host_h, from_target);
+            });
+      }));
+      ++presented_;
+      RescaleIfWanted();
+      return true;
+    }
     // How much of RefreshGuestOutput belongs to the SDK (before and after the callback) and how much to
     // PaintOutput.
     presenter->RefreshGuestOutput(
@@ -2845,7 +2867,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       VkCommandBufferBeginInfo start{};
       start.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
       start.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      if (dfn_.vkBeginCommandBuffer(commands_upload_, &start) != VK_SUCCESS) {
+      // usf4_deferred_async_submit: directly (its pool was reset in BeginRecording, nothing of it is queued).
+      if ((deferred::AsyncSubmit() ? deferred::Real() : dfn_).vkBeginCommandBuffer(commands_upload_, &start) !=
+          VK_SUCCESS) {
         return VK_NULL_HANDLE;
       }
       // Cached images may still be sampled by the preceding submission. Queue
@@ -8579,6 +8603,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     if (resolved_pool_device_error_ || sends_ < sleeping.order_retirement) return false;
     for (const auto& slot : slots_) {
       if (!slot.pending || slot.order <= order_completed_work_) continue;
+      deferred::WaitTicket(slot.ticket);  // usf4_deferred_async_submit: the fence must have been submitted
       const VkResult status = dfn_.vkGetFenceStatus(device_, slot.fence);
       if (status == VK_SUCCESS) order_completed_work_ =
           me::native::ObserveResolvedAllocationCompletion(order_completed_work_, slot.order, true);
@@ -9383,15 +9408,20 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     SlotWork& slot = slots_[slot_];
     Complete(slot);
     if (resolved_pool_device_error_) return false;
-    dfn_.vkResetCommandPool(device_, slot.pool_work, 0);
-    dfn_.vkResetCommandPool(device_, slot.pool_upload, 0);
-    dfn_.vkResetDescriptorPool(device_, slot.pool_conversion_edram, 0);
-    dfn_.vkResetDescriptorPool(device_, slot.pool_conversion_depth_edram, 0);
+    // usf4_deferred_async_submit: Complete waited for this slot's ticket and fence, so the worker has recorded and
+    // submitted everything that used these pools, and the GPU has finished it. The resets and the begin go to the
+    // driver directly (through the proxy each would drain the worker, which may still be recording the previous
+    // frame into another slot's command buffers); the commands that follow are queued after them.
+    const auto& fns = deferred::AsyncSubmit() ? deferred::Real() : dfn_;
+    fns.vkResetCommandPool(device_, slot.pool_work, 0);
+    fns.vkResetCommandPool(device_, slot.pool_upload, 0);
+    fns.vkResetDescriptorPool(device_, slot.pool_conversion_edram, 0);
+    fns.vkResetDescriptorPool(device_, slot.pool_conversion_depth_edram, 0);
     if (slot.pool_import_depth_edram)
-      dfn_.vkResetDescriptorPool(device_, slot.pool_import_depth_edram, 0);
-    if (slot.pool_conv_color_frag) dfn_.vkResetDescriptorPool(device_, slot.pool_conv_color_frag, 0);
-    if (slot.pool_depth_resolve_ms) dfn_.vkResetDescriptorPool(device_, slot.pool_depth_resolve_ms, 0);
-    if (slot.pool_stencil_copy) dfn_.vkResetDescriptorPool(device_, slot.pool_stencil_copy, 0);
+      fns.vkResetDescriptorPool(device_, slot.pool_import_depth_edram, 0);
+    if (slot.pool_conv_color_frag) fns.vkResetDescriptorPool(device_, slot.pool_conv_color_frag, 0);
+    if (slot.pool_depth_resolve_ms) fns.vkResetDescriptorPool(device_, slot.pool_depth_resolve_ms, 0);
+    if (slot.pool_stencil_copy) fns.vkResetDescriptorPool(device_, slot.pool_stencil_copy, 0);
     slot.conversions_edram = 0;
     commands_work_ = slot.work;
     commands_upload_ = slot.upload;
@@ -9399,7 +9429,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     VkCommandBufferBeginInfo start{};
     start.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     start.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (dfn_.vkBeginCommandBuffer(commands_work_, &start) != VK_SUCCESS) {
+    if (fns.vkBeginCommandBuffer(commands_work_, &start) != VK_SUCCESS) {
       return false;
     }
     slot.categories.clear();
@@ -9478,7 +9508,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   void Complete(SlotWork& slot) {
     for (SlotWork& other : slots_) {
       if (&other != &slot && other.pending && other.order < slot.order &&
-          dfn_.vkGetFenceStatus(device_, other.fence) == VK_SUCCESS) {
+          (deferred::WaitTicket(other.ticket), dfn_.vkGetFenceStatus(device_, other.fence) == VK_SUCCESS)) {
         CompleteA(other);
       }
     }
@@ -9489,6 +9519,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     if (!slot.pending) {
       return;
     }
+    deferred::WaitTicket(slot.ticket);  // usf4_deferred_async_submit: the fence must have been submitted
     const auto before_wait = std::chrono::steady_clock::now();
     const VkResult result_wait = dfn_.vkWaitForFences(device_, 1, &slot.fence, VK_TRUE, UINT64_MAX);
     if (result_wait != VK_SUCCESS) {
@@ -9714,7 +9745,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         dfn_.vkCmdPipelineBarrier(commands_upload_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after_uploads,
                                   0, nullptr, 0, nullptr);
-        if (dfn_.vkEndCommandBuffer(commands_upload_) != VK_SUCCESS) {
+        // usf4_deferred_async_submit: ended on the worker with the work buffer (through the proxy it would drain).
+        if (!deferred::AsyncSubmit() && dfn_.vkEndCommandBuffer(commands_upload_) != VK_SUCCESS) {
           return false;
         }
         buffers[n++] = commands_upload_;
@@ -9727,6 +9759,27 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         marked.categories.push_back(kGpuEnd);
         marked.marks_written = std::max(marked.marks_written, uint32_t(marked.categories.size()));
       }
+      if (deferred::AsyncSubmit()) {
+        // usf4_deferred_async_submit: ending the buffers and submitting them run on the worker after the commands
+        // already queued; the ring thread goes on. Whoever needs this slot's fence waits for its ticket first.
+        buffers[n++] = commands_work_;
+        const VkFence fence = slots_[slot_].fence;
+        slots_[slot_].ticket = deferred::RunOnWorker(new std::function<void()>([this, buffers, n, fence] {
+          for (uint32_t i = 0; i < n; ++i) {
+            if (deferred::Real().vkEndCommandBuffer(buffers[i]) != VK_SUCCESS) {
+              REXLOG_ERROR("[native] async submission: vkEndCommandBuffer failed");
+              return;
+            }
+          }
+          VkSubmitInfo send{};
+          send.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+          send.commandBufferCount = n;
+          send.pCommandBuffers = buffers.data();
+          const auto queue = vulkan_device_->AcquireQueue(family_, 0);
+          if (deferred::Real().vkQueueSubmit(queue.queue(), 1, &send, fence) != VK_SUCCESS)
+            REXLOG_ERROR("[native] async submission: vkQueueSubmit failed");
+        }));
+      } else {
       if (dfn_.vkEndCommandBuffer(commands_work_) != VK_SUCCESS) {
         return false;
       }
@@ -9740,6 +9793,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (dfn_.vkQueueSubmit(queue.queue(), 1, &send, slots_[slot_].fence) != VK_SUCCESS) {
           return false;
         }
+      }
+      slots_[slot_].ticket = 0;
       }
       SlotWork& slot = slots_[slot_];
       slot.pending = true;
@@ -9972,6 +10027,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
 
   // All pending outputs, before destroying or reusing what they use.
   void WaitOutputs() {
+    // usf4_deferred_async_submit: the outputs are painted on the worker; on the ring thread, let it finish first
+    // (on the worker itself this is a no-op).
+    deferred::Drain();
     for (uint32_t i = 0; i < kSlotsOutput; ++i) {
       if (pending_outputs_[i]) {
         const VkResult waited = dfn_.vkWaitForFences(device_, 1, &fences_output_[i], VK_TRUE, UINT64_MAX);

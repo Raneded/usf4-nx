@@ -9,6 +9,9 @@
 // commands reach the driver in the same order.
 #pragma once
 
+#include <cstdint>
+#include <functional>
+
 #include <rex/ui/vulkan/device.h>
 
 namespace sa2::native::deferred {
@@ -27,5 +30,16 @@ void Drain();
 // Ring thread: tells the worker about commands the batched mode (sa2_deferred_native_fast) still holds
 // back. Call before the ring thread idles; a no-op otherwise.
 void Flush();
+
+// usf4-nx (usf4_deferred_async_submit), ring thread:
+// true when the ring thread is the producer and the frame's submission goes through the worker.
+bool AsyncSubmit();
+// The real function table (calls that must not go through the queue, after a WaitTicket).
+const Functions& Real();
+// Runs `job` on the worker after everything queued so far (takes ownership); returns its ticket. Off the producer
+// thread it runs at once (ticket 0).
+uint64_t RunOnWorker(std::function<void()>* job);
+// Waits until the worker has run everything up to `ticket` (not the whole queue). 0 = nothing to wait for.
+void WaitTicket(uint64_t ticket);
 
 }  // namespace sa2::native::deferred

@@ -497,3 +497,29 @@ Ring per draw: uploads 5.3 us (VS constants re-uploaded 137,695 times per 10 s, 
 reports progress (at most `usf4_gpu_wait_max_us`, 1000) only when nothing can have changed since the previous
 iteration. PC fight: ~8,000 sleeps and ~8.5 s asleep per 10 s on the main thread instead of spinning. The enhancement
 use report (`[enh] uses in the last 10 s`) was not started in USF4; `usf4_app.h` now starts it.
+
+## The frame end no longer waits for the recording worker (`usf4_deferred_async_submit`, 2026-10-13)
+
+0.5.2 on the console (one tile, CPU 2193 / GPU 998.4): 48-50 fps; the GPU wait sleep took the main thread from 70 %
+to 55 % but the frame rate stayed: the limit is the ring thread + Vulkan recording worker pair. The ring waited
+2.6 s per 10 s for the worker (drains). A breakdown by cause (new report line "deferred recording drains by cause")
+on PC: the waits are at `vkEndCommandBuffer` of the frame's one submission, then `vkResetCommandPool`; the other
+drain-class calls (`vkBeginCommandBuffer`, `vkResetDescriptorPool`, `vkQueueSubmit`, `vkGetQueryPoolResults` through
+the generic wrapper) found the queue already empty only because the end had just drained it.
+
+With the cvar (Switch default from 0.5.3):
+- `SendWork`: the upload and work buffers are ended and submitted by a job on the worker (`deferred::RunOnWorker`),
+  in queue order; the slot keeps the job's ticket. Every fence status/wait on a work slot first waits for that ticket
+  only (`deferred::WaitTicket`), never for the whole queue.
+- `BeginRecording` and the upload buffer's begin: after the slot's ticket and fence, the pool resets and
+  `vkBeginCommandBuffer` go straight to the driver (`deferred::Real()`); the commands after them are queued.
+- `Present`: `RefreshGuestOutput` + `PaintOutput` run as a job on the worker after the frame's submission, with a
+  copy of the source image (view and size); the presenter therefore never gets an output whose work is not submitted.
+  `WaitOutputs` on the ring drains first. `presented_` counts the queued paints.
+- Query results are read with the real `vkGetQueryPoolResults` (all reads follow the slot's fence).
+- The arena is a ring when the cvar is on (markers per queued call, space returned as the worker passes them).
+
+PC one-tile fight: 0 drains and 0 ticket waits per 10 s (before: ~170 drains, 34 with waits); no errors. Lockstep
+capture (frames 7000-7119): every frame equals the reference's same or previous frame (MAD 0.00-0.08 in the first 30
+frames); 33 captured frames repeat the previous one because the recorder samples the output at the guest's swap,
+before the worker has painted it (the content is the same; the output reaches the presenter later).

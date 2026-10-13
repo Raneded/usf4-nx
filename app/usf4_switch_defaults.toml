@@ -44,3 +44,9 @@ usf4_edram4_clear_color_consumer = true
 # is gone). false in usf4.toml for the three strips. 0.5.1: the renderer's EDRAM model has 4096 tiles, so the one-tile
 # scene's depth no longer wraps onto colour 0 (it made the ring thread walk ~30 M EDRAM tiles a second on the Switch).
 usf4_single_tile = true
+
+# 0.5.3: the end of the frame does not wait for the Vulkan recording worker: the work submission and the output paint
+# run on the worker in queue order, and the ring thread starts the next frame (on 0.5.2 it waited ~5 ms per frame,
+# 26 % of its time, at vkEndCommandBuffer). PC: 0 drains in a fight, same frames (docs/usf4-notes.md). false in
+# usf4.toml for the previous behaviour.
+usf4_deferred_async_submit = true
