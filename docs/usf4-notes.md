@@ -567,3 +567,18 @@ hid this; `skip_msr` removed that. The PC never showed it: Linux time-slices (an
 from the P8 GPU, so `out/pc/fight` fps cannot show this class of bug).
 Fix: `src/usf4_job_pop_yield.cpp` hooks the pop; an empty pop yields (`svcSleepThread(YieldType_WithCoreMigration)`).
 Code check: FNV 0xA74D6392CF5F4057 over 0x58 bytes.
+
+## Column imports: the shadow-map clear strips (`usf4_edram4_import_columns`, 0.6.0, 2026-10-14)
+
+Console GPU per Swap in a 60 fps fight (0.5.8, 998.4 MHz): ~12.6 ms busy, of which depth imports 5.2 ms
+(edram_import9 3.3, edram_import 1.9); then scene 2.6, copies 1.6, 320 1.2, scene_no_z 1.1, alias 0.5. ~80
+single-tile 9-pass imports per frame (~25 us each) plus ~49 late stencil fetches.
+Cause: Direct3D clears the shadow maps (512x512 in view 0E0, pitch 560; 1024x1024 in view 340, pitch 1040) with
+VS777/PS641 rectangles in 32/64-pixel strips. The last strip leaves the right edge of the last tile column uncovered,
+so each tile row of that column was imported alone (SynchronizeEDRAM4 runs are per row), and its stencil was later
+fetched alone again (FetchStencilDeferredEDRAM4). Each import of a tile is a draw of up to 9 passes.
+Fix: runs of one sync / one fetch that form a column (same source, same tile offset, same x range, touching rows)
+become one ImportColorDepthEDRAM4 over the column's rectangle; the shader maps tiles linearly from the start and the
+rectangle limits rasterization to the column, while the bookkeeping (stencil sources, synchronized versions,
+stencil-only clears) walks the original runs. PC with the Switch settings, 10 s of fight: 9-pass intervals 7014 ->
+823, depth-import intervals 7187 -> 1034, late fetches 4306 -> 625 (PC fight fps 15 -> 21 on this GPU-bound box).

@@ -240,6 +240,14 @@ REXCVAR_DEFINE_INT32(sa2_diag_dump_marks_s, 0, "SA2 renderer",
 REXCVAR_DEFINE_BOOL(sa2_native_edram4_batch, true, "SA2 renderer",
                     "EDRAM mode 4: the transfers one sync needs (one per tile-row run) share one barrier pair "
                     "(compute) and one render pass (depth imports) instead of one each; false = one by one");
+// usf4-nx: Direct3D clears USF4's shadow maps (512x512 in a 560-pixel view, 1024x1024 in a 1040 one) in 32/64-pixel
+// strips. The last strip leaves the right edge of the last tile column uncovered, so every tile row of that column
+// is imported on its own (one tile, one import draw of up to 9 passes): ~75 per frame, ~2 ms of GPU on the Switch.
+// The runs of one sync that form a column (same source, same tile offset, same x range, rows touching) become one
+// import draw over the column's rectangle; its bookkeeping still walks the original runs only.
+REXCVAR_DEFINE_BOOL(usf4_edram4_import_columns, true, "USF4",
+                    "EDRAM mode 4: depth imports of one sync that form a vertical column of tile runs (same source "
+                    "and offset) are drawn as one import over the column's rectangle instead of one per tile row");
 REXCVAR_DEFINE_BOOL(sa2_native_conversion_frag, false, "SA2 renderer",
                     "EDRAM mode 4: conversions between 32-bit color views of one EDRAM region (RGBA8 / UNORM10 / 7e3: "
                     "the HDR scene color round trips of the post-processing chain) as a fragment pass over the run's "
@@ -3803,7 +3811,12 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     Image* source;
     uint32_t tile_source, tile, count;
     bool native_msaa_import;
+    // usf4_edram4_import_columns: a merged column. [tile, +count) is then the linear range from the first run to
+    // the end of the last one, rect the column (only its tiles are drawn) and runs the original (tile, count) runs.
+    std::vector<std::pair<uint32_t, uint32_t>> runs;
+    VkRect2D rect{};
   };
+  uint64_t edram4_columns_merged_ = 0, edram4_columns_runs_ = 0, edram4_columns_drawn_ = 0, edram4_columns_failed_ = 0;
   struct CopyStencilPending {
     Image* source;
     Image* target;
@@ -4549,6 +4562,63 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       if (!target.edram_depth && !clear_overwrite) PublishEDRAM4(target, area, limit, true);
       return true;
     }
+    // usf4_edram4_import_columns: consecutive one-row runs that go through ImportColorDepthEDRAM4 from the same
+    // source, at the same tile offset (one linear source mapping), over the same x range in touching tile rows,
+    // become one span: the import draws the column's rectangle once (its shader maps tiles linearly and only the
+    // rectangle is rasterized), and the bookkeeping walks the original runs.
+    if (target.edram_depth && spans.size() > 1 && !edram4_import_stencil_only_ &&
+        REXCVAR_GET(usf4_edram4_import_columns)) {
+      const auto imports = [&](const SpanEDRAM4& t) {
+        const Image& src = *t.source;
+        return t.native_msaa_import || !src.edram_depth || src.depth_float24_half != target.depth_float24_half ||
+               src.edram_format != target.edram_format || src.edram_msaa_x != target.edram_msaa_x ||
+               src.edram_msaa_y != target.edram_msaa_y || !target.accepts_target_of_copy;
+      };
+      std::vector<SpanEDRAM4> merged;
+      merged.reserve(spans.size());
+      for (size_t i = 0; i < spans.size();) {
+        VkRect2D first{};
+        size_t j = i + 1;
+        if (imports(spans[i]) && !spans[i].source->invalid_content &&
+            RectImportEDRAM4(target, spans[i].tile, spans[i].count, first)) {
+          VkRect2D last = first;
+          const uint32_t offset = spans[i].tile_source - spans[i].tile;
+          for (; j < spans.size(); ++j) {
+            const SpanEDRAM4& n = spans[j];
+            VkRect2D r{};
+            if (n.source != spans[i].source || n.native_msaa_import != spans[i].native_msaa_import ||
+                n.tile_source - n.tile != offset || !RectImportEDRAM4(target, n.tile, n.count, r) ||
+                r.offset.x != first.offset.x || r.extent.width != first.extent.width ||
+                r.offset.y != last.offset.y + int32_t(last.extent.height))
+              break;
+            // One row per run (the rectangle is then exactly the run's tiles).
+            if (n.tile / PitchTilesEDRAM(target) != (n.tile + n.count - 1) / PitchTilesEDRAM(target)) break;
+            last = r;
+          }
+          if (spans[i].tile / PitchTilesEDRAM(target) != (spans[i].tile + spans[i].count - 1) /
+                                                            PitchTilesEDRAM(target))
+            j = i + 1;
+        }
+        if (j - i < 2) {
+          merged.push_back(std::move(spans[i]));
+          ++i;
+          continue;
+        }
+        SpanEDRAM4 column = spans[i];
+        const SpanEDRAM4& end = spans[j - 1];
+        column.count = end.tile + end.count - column.tile;
+        column.rect = first;
+        VkRect2D end_rect{};
+        RectImportEDRAM4(target, end.tile, end.count, end_rect);
+        column.rect.extent.height = uint32_t(end_rect.offset.y + int32_t(end_rect.extent.height) - first.offset.y);
+        for (size_t k = i; k < j; ++k) column.runs.push_back({spans[k].tile, spans[k].count});
+        ++edram4_columns_merged_;
+        edram4_columns_runs_ += j - i;
+        merged.push_back(std::move(column));
+        i = j;
+      }
+      spans = std::move(merged);
+    }
     const bool batch = REXCVAR_GET(sa2_native_edram4_batch) && spans.size() > 1 && !edram4_batch_.active &&
         slots_[slot_].conversions_edram + 2 * spans.size() + 16 < kConversionsEDRAMPerSlot;
     if (batch) {
@@ -4558,7 +4628,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       if (target.edram_depth)
         for (const auto& t : spans) {
           VkRect2D r;
-          if (!RectImportEDRAM4(target, t.tile, t.count, r)) continue;
+          if (!t.runs.empty()) r = t.rect;
+          else if (!RectImportEDRAM4(target, t.tile, t.count, r)) continue;
           if (!edram4_batch_.has_area) {
             edram4_batch_.area_import = r;
             edram4_batch_.has_area = true;
@@ -4596,12 +4667,12 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       bool success = false;
       if (target.edram_depth) {
         if (native_msaa_import || !source.edram_depth) {
-          success = ImportColorDepthEDRAM4(source, target, owner_state.tile_local, tile, count);
+          success = ImportColorDepthEDRAM4(source, target, owner_state.tile_local, tile, count, &t);
         } else if (source.depth_float24_half != target.depth_float24_half ||
             source.edram_format != target.edram_format ||
             source.edram_msaa_x != target.edram_msaa_x ||
             source.edram_msaa_y != target.edram_msaa_y || !target.accepts_target_of_copy)
-          success = ImportColorDepthEDRAM4(source, target, owner_state.tile_local, tile, count);
+          success = ImportColorDepthEDRAM4(source, target, owner_state.tile_local, tile, count, &t);
         else {
           if (batch && !CloseBatchEDRAM4()) return finish_batch(false);
           success = CopyTilesEDRAM4(source, target, owner_state.tile_local, tile, count);
@@ -4639,6 +4710,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       } else {
         success = ConvertAliasEDRAM(source, target, owner_state.tile_local, tile, count);
       }
+      if (!t.runs.empty()) ++(success ? edram4_columns_drawn_ : edram4_columns_failed_);
       if (!success && REXCVAR_GET(banjo_native_edram4_skip_unsupported)) {
         // banjo-nx: a conversion the renderer does not have (2x MSAA <-> 1x color alias, depth -> color) used to
         // drop the whole draw: Nuts & Bolts' 2x MSAA scene target (base 768) overlaps the 1x one (base 720), so
@@ -4649,19 +4721,24 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                       "base {} msaa {}x{} depth {}, {} tiles", target.edram_base, target.edram_msaa_x,
                       target.edram_msaa_y, target.edram_depth, source.edram_base, source.edram_msaa_x,
                       source.edram_msaa_y, source.edram_depth, count);
-        for (uint32_t i = 0; i < count; ++i) {
-          const uint32_t physical = (target.edram_base + tile + i) & kMaskEDRAM4;
-          NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
-        }
+        const std::vector<std::pair<uint32_t, uint32_t>> skipped_one{{tile, count}};
+        for (const auto& run : t.runs.empty() ? skipped_one : t.runs)
+          for (uint32_t i = 0; i < run.second; ++i) {
+            const uint32_t physical = (target.edram_base + run.first + i) & kMaskEDRAM4;
+            NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
+          }
         continue;
       }
       if (!success) return finish_batch(FailureEDRAM4("physical transfer unsupported or failed", target, &source));
-      for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t physical = (target.edram_base + tile + i) & kMaskEDRAM4;
-        NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
-        if (owners_tiles_edram4_[physical].image) owners_tiles_edram4_[physical].image->edram4_exported = true;
+      const std::vector<std::pair<uint32_t, uint32_t>> one{{tile, count}};
+      for (const auto& run : t.runs.empty() ? one : t.runs) {
+        for (uint32_t i = 0; i < run.second; ++i) {
+          const uint32_t physical = (target.edram_base + run.first + i) & kMaskEDRAM4;
+          NoteSynchronizedEDRAM4(target, physical, owners_tiles_edram4_[physical].version);
+          if (owners_tiles_edram4_[physical].image) owners_tiles_edram4_[physical].image->edram4_exported = true;
+        }
+        edram4_sync_copied_ += run.second;
       }
-      edram4_sync_copied_ += count;
     }
     if (!finish_batch(true)) return false;
     // Loading into a color view is now authoritative even when a later draw is skipped. Depth remains
@@ -5571,6 +5648,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   bool FetchStencilDeferredEDRAM4(Image& view, uint32_t start, uint32_t count) {
     const auto it = edram4_stencil_source_.find(&view);
     if (it == edram4_stencil_source_.end()) return true;
+    std::vector<SpanEDRAM4> fetches;  // the runs to fetch (tile = view tile, tile_source = source tile)
     for (uint32_t i = 0; i < count;) {
       const SourceStencil f = it->second[(start + i) & kMaskEDRAM4];
       if (!f.image) { ++i; continue; }
@@ -5580,15 +5658,54 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         if (g.image != f.image || g.tile != ((f.tile + n) & kMaskEDRAM4)) break;
         ++n;
       }
-      Image& src_data = *const_cast<Image*>(f.image);
+      fetches.push_back({const_cast<Image*>(f.image), uint32_t(f.tile), (start + i) & kMaskEDRAM4, n, false, {}, {}});
+      i += n;
+    }
+    // usf4_edram4_import_columns: one-row runs from the same source at the same tile offset, over the same x range
+    // in touching tile rows (the strips of a clear leave one partial tile per row), are fetched as one import.
+    for (size_t a = 0; a < fetches.size();) {
+      size_t b = a + 1;
+      VkRect2D first{}, last{};
+      const uint32_t pitch = PitchTilesEDRAM(view);
+      const auto one_row = [&](const SpanEDRAM4& t) {
+        return pitch && t.tile / pitch == (t.tile + t.count - 1) / pitch && t.tile + t.count <= kTilesEDRAM4;
+      };
+      if (REXCVAR_GET(usf4_edram4_import_columns) && one_row(fetches[a]) &&
+          RectImportEDRAM4(view, fetches[a].tile, fetches[a].count, first)) {
+        last = first;
+        for (; b < fetches.size(); ++b) {
+          const SpanEDRAM4& n = fetches[b];
+          VkRect2D r{};
+          if (n.source != fetches[a].source ||
+              n.tile_source - n.tile != fetches[a].tile_source - fetches[a].tile || n.tile < fetches[a].tile ||
+              !one_row(n) || !RectImportEDRAM4(view, n.tile, n.count, r) || r.offset.x != first.offset.x ||
+              r.extent.width != first.extent.width || r.offset.y != last.offset.y + int32_t(last.extent.height))
+            break;
+          last = r;
+        }
+      }
+      Image& src_data = *fetches[a].source;
+      SpanEDRAM4 column = fetches[a];
+      if (b - a > 1) {
+        column.count = fetches[b - 1].tile + fetches[b - 1].count - column.tile;
+        column.rect = first;
+        column.rect.extent.height = uint32_t(last.offset.y + int32_t(last.extent.height) - first.offset.y);
+        for (size_t k = a; k < b; ++k) column.runs.push_back({fetches[k].tile, fetches[k].count});
+        ++edram4_columns_merged_;
+        edram4_columns_runs_ += b - a;
+      }
       edram4_import_stencil_only_ = true;
-      const bool ok = src_data.prepared && ImportColorDepthEDRAM4(src_data, view, f.tile, (start + i) & kMaskEDRAM4, n);
+      const bool ok = src_data.prepared &&
+          ImportColorDepthEDRAM4(src_data, view, column.tile_source, column.tile, column.count,
+                                 column.runs.empty() ? nullptr : &column);
       edram4_import_stencil_only_ = false;
       if (!ok) return FailureEDRAM4("deferred stencil fetch failed", view, &src_data);
-      StencilRealEDRAM4(view, start + i, n);
+      for (size_t k = a; k < b; ++k) {
+        StencilRealEDRAM4(view, fetches[k].tile, fetches[k].count);
+        edram4_stencil_fetched_tiles_ += fetches[k].count;
+      }
       ++edram4_stencil_fetched_;
-      edram4_stencil_fetched_tiles_ += n;
-      i += n;
+      a = b;
     }
     return true;
   }
@@ -6802,7 +6919,19 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
   }
 
   bool ImportColorDepthEDRAM4(Image& source, Image& target,
-                                 uint32_t source_start, uint32_t target_start, uint32_t count) {
+                                 uint32_t source_start, uint32_t target_start, uint32_t count,
+                                 const SpanEDRAM4* column = nullptr) {
+    // usf4_edram4_import_columns: the tiles really imported, as (offset from target_start, count) runs.
+    std::vector<std::pair<uint32_t, uint32_t>> runs;
+    if (column && !column->runs.empty())
+      for (const auto& r : column->runs) runs.push_back({r.first - target_start, r.second});
+    else
+      runs.push_back({0u, count});
+    const auto deferred_runs = [&](const Image& view, uint32_t start) {
+      for (const auto& r : runs) if (StencilDeferredEDRAM4(view, start + r.first, r.second)) return true;
+      return false;
+    };
+    const auto real_runs = [&]() { for (const auto& r : runs) StencilRealEDRAM4(target, target_start + r.first, r.second); };
     const bool source_depth = source.edram_depth;
     const bool source_raw64 = source.edram_64bpp;
     const bool native_msaa_import = IsDepthNative2xEDRAM4(source) &&
@@ -6856,7 +6985,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     const uint32_t bottom = std::min(target.height, (last_row + 1) * destination_tile_height);
     if (sx >= target.width || sy >= target.height || right <= sx || bottom <= sy)
       return FailureEDRAM4("depth import destination tile range outside attachment", target, &source);
-    const VkRect2D scissor{{int32_t(sx), int32_t(sy)}, {right - sx, bottom - sy}};
+    const VkRect2D scissor = column && !column->runs.empty() ? column->rect
+                                                              : VkRect2D{{int32_t(sx), int32_t(sy)}, {right - sx, bottom - sy}};
     // sa2-nx render resolution: the pass works in host pixels (both views at the same scale).
     const VkRect2D host_scissor = HostRect(target, scissor);
     if (source.scale_q != target.scale_q)
@@ -6973,7 +7103,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
             int64_t(edram4_stencil_replacement_->offset.y) + edram4_stencil_replacement_->extent.height;
     if (stencil_replaced) {
       steps = 1;  // the draw about to run replaces all of this stencil: only depth must arrive
-      StencilRealEDRAM4(target, target_start, count);
+      real_runs();
       ++edram4_stencil_replaced_;
     } else if (REXCVAR_GET(sa2_native_edram4_stencil_lazy)) {
       const auto source_source = edram4_stencil_source_.find(&source);
@@ -6999,15 +7129,18 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       } else if (!target.edram4_usa_stencil || draw_no_stencil) {
         auto& sources = StencilSourcesWrite(&target);
         if (sources.empty()) sources.resize(kTilesEDRAM4);
-        for (uint32_t i = 0; i < count; ++i) sources[(target_start + i) & kMaskEDRAM4] = source_for(i);
+        for (const auto& r : runs)
+          for (uint32_t i = r.first; i < r.first + r.second; ++i)
+            sources[(target_start + i) & kMaskEDRAM4] = source_for(i);
         steps = 1;
         ++edram4_stencil_skipped_;
-      } else if (StencilDeferredEDRAM4(source, source_start, count)) {
+      } else if (deferred_runs(source, source_start)) {
         bool own = true;
-        for (uint32_t i = 0; i < count && own; ++i) {
-          const SourceStencil f = source_for(i);
-          own = f.image == &target && f.tile == ((target_start + i) & kMaskEDRAM4);
-        }
+        for (const auto& r : runs)
+          for (uint32_t i = r.first; i < r.first + r.second && own; ++i) {
+            const SourceStencil f = source_for(i);
+            own = f.image == &target && f.tile == ((target_start + i) & kMaskEDRAM4);
+          }
         if (own) {
           steps = 1;
           keep_stencil = true;  // the real stencil never left the destination
@@ -7015,16 +7148,16 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         } else {
           ++edram4_stencil_inexact_;  // stencil lived elsewhere: the 8 passes copy the view's stale bits
         }
-        StencilRealEDRAM4(target, target_start, count);
+        real_runs();
       } else {
-        StencilRealEDRAM4(target, target_start, count);
+        real_runs();
       }
     }
     uint32_t first_step = 0;
     // 1x TRANSFER_DST destination with a depth source: the stencil goes through the copy engine after the
     // pass (CopyStencilEDRAM4) instead of 8 masked draws; the pass keeps only the depth draw.
     // Color sources too (RGBA8 / UNORM10 / 7e3 classes, 1x): the stencil is the color word's low byte.
-    const bool copy_stencil = REXCVAR_GET(sa2_native_edram4_stencil_copy) &&
+    const bool copy_stencil = REXCVAR_GET(sa2_native_edram4_stencil_copy) && runs.size() == 1 &&
         (source_depth || (source.edram_format == 0 || source.edram_format == 2 || source.edram_format == 3)) &&
         !source_raw64 && (steps > 1 || edram4_import_stencil_only_) &&
         me::native::IsSingleSample(uint32_t(target.sample_count)) && target.accepts_target_of_copy &&
@@ -7050,9 +7183,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       std::vector<VkClearRect> rects;
       const uint32_t dp = PitchTilesEDRAM(target);
       const uint32_t tw = 80u >> target.edram_msaa_x, th = 16u >> target.edram_msaa_y;
-      for (uint32_t t = 0; t < count && dp;) {
+      for (const auto& run : runs)
+      for (uint32_t t = run.first; t < run.first + run.second && dp;) {
         const uint32_t tile = target_start + t, col = tile % dp;
-        const uint32_t n = std::min(count - t, dp - col);
+        const uint32_t n = std::min(run.first + run.second - t, dp - col);
         const uint32_t x = (col * tw) << target.raster_grid_x, y = (tile / dp) * th;
         if (x < target.width && y < target.height)
           rects.push_back({HostRect(target, VkRect2D{{int32_t(x), int32_t(y)},
@@ -7068,9 +7202,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       auto& n = edram4_import9_pairs_[fmt::format("{}{:03X}:{}x{}:mx{}my{}->{:03X}:{}x{}:mx{}my{}{}",
           source.edram_depth ? "D" : "C", source.edram_base, source.width, source.height, source.edram_msaa_x,
           source.edram_msaa_y, target.edram_base, target.width, target.height, target.edram_msaa_x,
-          target.edram_msaa_y, StencilDeferredEDRAM4(source, source_start, count) ? " deferred" : "")];
+          target.edram_msaa_y, deferred_runs(source, source_start) ? " deferred" : "")];
       ++n.first;
-      n.second += count;
+      for (const auto& r : runs) n.second += r.second;
     }
     const uint8_t bits_source = source_depth && !source_raw64 ? source.edram4_bits_stencil : uint8_t(255);
     target.edram4_bits_stencil |= bits_source;
@@ -10021,10 +10155,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       std::string nine;
       for (const auto& [k, v] : edram4_import9_pairs_) nine += fmt::format(" [{} {}ops/{}t]", k, v.first, v.second);
       REXLOG_INFO("[native] EDRAM mode4 9-pass imports:{}; stencil bit passes skipped (bit never set): {}; "
-                  "copy-engine stencil imports {} ({} tiles)",
+                  "copy-engine stencil imports {} ({} tiles); column imports (usf4_edram4_import_columns) {} "
+                  "replacing {} runs, drawn {} failed {}",
                   nine.empty() ? " none" : nine, edram4_bits_skipped_, edram4_stencil_copies_,
-                  edram4_stencil_copies_tiles_);
+                  edram4_stencil_copies_tiles_, edram4_columns_merged_, edram4_columns_runs_,
+                  edram4_columns_drawn_, edram4_columns_failed_);
       edram4_bits_skipped_ = edram4_stencil_copies_ = edram4_stencil_copies_tiles_ = 0;
+      edram4_columns_merged_ = edram4_columns_runs_ = edram4_columns_drawn_ = edram4_columns_failed_ = 0;
       edram4_import9_pairs_.clear();
       edram4_stencil_skipped_ = edram4_stencil_returned_ = edram4_stencil_inexact_ = edram4_stencil_late_ =
           edram4_stencil_exported_ = 0;
