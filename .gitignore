@@ -62,3 +62,6 @@ __pycache__/
 .vscode/
 .claude/
 .DS_Store
+
+# --- Personal NRO icon (may be game artwork; used instead of app/icon.jpg when present) ---
+/app/icon_local.jpg

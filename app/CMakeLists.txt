@@ -222,10 +222,15 @@ if(REXGLUE_PLATFORM_SWITCH)
     target_include_directories(usf4 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/builtin_config")
     target_compile_definitions(usf4 PRIVATE USF4_BUILTIN_CONFIG=1)
 
-    # The homebrew menu's entry (app/icon.jpg: a plain 256x256 JPEG made for this port, no game artwork).
+    # The homebrew menu's entry (app/icon.jpg: a plain 256x256 JPEG made for this port, no game artwork). A personal
+    # app/icon_local.jpg (256x256 JPEG, git-ignored: it may be game artwork) replaces it when present.
+    set(USF4_NRO_ICON "${USF4_NRO_ICON}")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icon_local.jpg")
+        set(USF4_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon_local.jpg")
+    endif()
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "usf4-nx"
-        VERSION "0.5.7"
-        ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
+        VERSION "0.5.8"
+        ICON "${USF4_NRO_ICON}")
 endif()
