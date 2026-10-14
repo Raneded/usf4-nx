@@ -222,7 +222,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     target_include_directories(usf4 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/builtin_config")
     target_compile_definitions(usf4 PRIVATE USF4_BUILTIN_CONFIG=1)
 
-    # The homebrew menu's entry (app/icon.jpg: a plain 256x256 JPEG made for this port, no game artwork). A personal
+    # The homebrew menu's entry (app/icon.jpg: an original 256x256 JPEG made for this port by tools/make_icon.py, no game artwork). A personal
     # app/icon_local.jpg (256x256 JPEG, git-ignored: it may be game artwork) replaces it when present.
     set(USF4_NRO_ICON "${USF4_NRO_ICON}")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icon_local.jpg")
