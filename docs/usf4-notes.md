@@ -553,3 +553,17 @@ locals, skip_msr, dform_disp_split, fctiwz_inline, fp_moves_modeless; post steps
 to the build's own codegen command): no-volatile guest loads/stores + loop barriers (32,010 loop headers) + direct
 calls (132,354 calls, 393 hooked addresses kept). Stage B (non_volatile_as_local, elide_lr_stores,
 non_argument_as_local) needs the read-before-write and non-argument audits first. PC: boots and fights normally.
+
+## 0.5.6 on the console: job workers starved the main thread (0.5.7 `usf4_cpu_job_pop_yield`, 2026-10-14)
+
+0.5.6 menus ran at ~58 fps, but fights fell to 10-12 fps with all three cores at 100 % and the GPU at 17 %. The profile:
+the four Job Workers spent 80-90 % of their samples in the XDK job-list pop `sub_82966BA8` (via `sub_82967288`, the
+worker loop `sub_82966C28`: "while the batch flag [+56] is set: pop a job and run it"). The main thread
+(`sub_82966C90` publishes a batch, sets [+56] = 1, runs jobs itself, clears it at the end) was 92 % waiting. All of
+them run at Horizon priority 0x3B (59). Horizon only switches between threads of equal priority when one yields (or
+at its 10 ms rotation of priority-59 threads). So a woken main thread waited for a core that a spinning worker held.
+In 0.5.5 each interrupt-off section took the codegen's global recursive mutex, and the contended mutex slept, which
+hid this; `skip_msr` removed that. The PC never showed it: Linux time-slices (and fights there were always 10-13 fps
+from the P8 GPU, so `out/pc/fight` fps cannot show this class of bug).
+Fix: `src/usf4_job_pop_yield.cpp` hooks the pop; an empty pop yields (`svcSleepThread(YieldType_WithCoreMigration)`).
+Code check: FNV 0xA74D6392CF5F4057 over 0x58 bytes.
