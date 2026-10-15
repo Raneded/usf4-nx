@@ -8151,7 +8151,13 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       offset = e.offset;
       return true;
     }
+    // The CRC fingerprint (sa2_crc_fingerprint.h, 2^-64 odds, ~4 bytes/cycle on the A57): XXH3 here was ~10 % of the
+    // Switch ring thread in 0.6.2 (5.6 MB per frame, its NEON loop plus an out-of-line XXH_memcpy).
+#if SA2_CRC_FINGERPRINT
+    const uint64_t hash = sa2::native::crc_fingerprint::Fingerprint64(data, bytes, 0);
+#else
     const uint64_t hash = XXH3_64bits(data, bytes);
+#endif
     ++vc_hashes_;
     vc_bytes_hashed_ += bytes;
     if (live && e.hash == hash) {

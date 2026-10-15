@@ -625,3 +625,8 @@ sky keeps them).
 PC with the Switch settings, 10 s of fight: 950 MB bound from the cache (16,829 hash checks + 2,130 same-frame
 reuses), 1.2 MB copied into it, 1.1 MB left on the per-frame path (was all of it).
 PC lockstep (120 frames of fight, Switch settings) with the cache off and on: bit-identical (same frame hashes).
+Console 0.6.2 (1785 / 768, 2026-10-15): buffer created; ~3.1-3.7 GB per 10 s bound from the cache (~6 MB per frame),
+only 20-40 MB per 10 s still on the per-frame path. Fights 59-60 fps, Status Monitor cores 75 / 94 / 83 %, GPU 89 %.
+But the ring's work per Swap did not drop (~12.5 ms, 27 us per draw): XXH3 over the 5.6 MB checked per frame was
+~10 % of the ring's samples (its NEON loop plus an out-of-line XXH_memcpy). 0.6.3 hashes with the CRC fingerprint
+(sa2_crc_fingerprint.h) on the Switch.
