@@ -606,3 +606,22 @@ PC: same 314 files and 16115897 bytes as before.
 Console 0.6.1 (1785 / 768): save mount 5.2-6.2 ms (was 216-570); no hitch next to the save opens any more. Fights
 59.9 fps, Status Monitor GPU load 88 %, cores 72 / 91 / 89 %. Hitches left: boot (300-480 ms) and the versus and
 stage loading screens (66-350 ms), while the game loads its own data.
+
+## Vertex ranges kept across frames (`usf4_vertex_cache`, 0.6.2, 2026-10-15)
+
+Console 0.6.1 fight (1785 / 768): CPU threads add up to ~260 % of the 3 game cores; the ring thread (75 %) spent
+~18 % of its samples in CopyVertices / memcpy / NEON loads and stores. The same-frame dedupe hits only ~3 %;
+~16,000 lookups per second missed because the range was "copied in an older work slot": the same bytes as the
+frame before, copied again because the upload buffer belongs to a work slot.
+`app/src/me/native/usf4_vertex_cache.h`: a 24 MB buffer (cvar `usf4_vertex_cache_mb`) in the upload memory type,
+handed out as a ring. A binding that misses the same-frame dedupe is looked up by (address, order, bytes); the guest
+bytes are hashed (XXH3-64) and an equal hash binds the kept copy; a different hash copies to a new place (never in
+place). Within a frame a range already checked is not hashed again until a guest synchronization (the dedupe's own
+rule). An allocation is reused only when the last frame that bound it has finished (UseSlot follows the wait for
+that slot's fence; fences signal in submission order); one still in flight at the front of the ring is retired
+(no new draw gets it) and frees itself a few frames later. Ranges that change on 3 copies in a row are left out for
+120 frames. Bindings from the cache use the buffer per binding (the bind check compares buffers too; the postponed
+sky keeps them).
+PC with the Switch settings, 10 s of fight: 950 MB bound from the cache (16,829 hash checks + 2,130 same-frame
+reuses), 1.2 MB copied into it, 1.1 MB left on the per-frame path (was all of it).
+PC lockstep (120 frames of fight, Switch settings) with the cache off and on: bit-identical (same frame hashes).

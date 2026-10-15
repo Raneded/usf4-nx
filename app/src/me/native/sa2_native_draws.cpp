@@ -139,6 +139,7 @@ REXCVAR_DEFINE_BOOL(sa2_native_sort_updates_texture, true, "SA2 renderer",
 #endif
 #include <cstdio>
 #include "sa2_crc_fingerprint.h"
+#include "usf4_vertex_cache.h"
 
 // Only for RexSwitchSetCurrentThreadPriorityOk (texture bind thread). That header deliberately does not
 // include switch.h (same as in the native graphics system).
@@ -1048,6 +1049,12 @@ REXCVAR_DEFINE_INT32(sa2_native_upload_memory, 0, "SA2 renderer",
                      "CPU cache), 1 = with CPU cache (published with vkFlushMappedMemoryRanges before "
                      "submitting), 2 = without CPU cache")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(usf4_vertex_cache, true, "SA2 renderer",
+                    "Vertex ranges are kept across frames in their own GPU buffer and bound again while the guest "
+                    "bytes hash the same (usf4_vertex_cache.h); false = copied every frame, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(usf4_vertex_cache_mb, 24, "SA2 renderer", "Size of the usf4_vertex_cache buffer, in MB")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(sa2_shared_native_cache, true, "SA2 renderer",
                     "Native renderer: the per-draw shared constants (488 bytes) "
                     "in a small buffer WITH CPU cache, separate from the upload buffer. Measured in build 155: writing them without "
@@ -1190,6 +1197,9 @@ constexpr uint32_t kCapacityHeap[4] = {4096, 16, 64, 512};  // 2D, 3D, cube, sam
 // for them, and it has to match the array in sa2_native_targets.cpp.
 constexpr size_t kSlotsOfWork = 3;
 constexpr VkDeviceSize kUploadSize = VkDeviceSize(64) << 20;
+// usf4_vertex_cache: ranges smaller than this are copied as before (the hash and the lookup would cost about
+// as much as the copy).
+constexpr uint32_t kVertexCacheMinBytes = 256;
 // Separate buffer for the shared constants, per slot. ~1,400 draws x 512 bytes = 0.7 MB per frame; if it
 // fills up, the work is submitted just as with the upload buffer.
 constexpr VkDeviceSize kSharedSize = VkDeviceSize(4) << 20;  // per work slot (there are three)
@@ -2635,6 +2645,9 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       if (s.buffer != VK_NULL_HANDLE) dfn_.vkDestroyBuffer(device_, s.buffer, nullptr);
       if (s.memory != VK_NULL_HANDLE) dfn_.vkFreeMemory(device_, s.memory, nullptr);
     }
+    if (vc_data_) dfn_.vkUnmapMemory(device_, vc_memory_);  // usf4_vertex_cache
+    if (vc_buffer_ != VK_NULL_HANDLE) dfn_.vkDestroyBuffer(device_, vc_buffer_, nullptr);
+    if (vc_memory_ != VK_NULL_HANDLE) dfn_.vkFreeMemory(device_, vc_memory_, nullptr);
   }
 
   bool Initialize() {
@@ -3569,6 +3582,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       }
     }
     std::array<VkDeviceSize, 16> offsets_vertices{};
+    uint32_t cached_bindings = 0;  // usf4_vertex_cache: bit b = binding b is in vc_buffer_, not the upload buffer
     // If the guest has waited for the GPU since the last draw, it may legally have rewritten an already
     // referenced range: what was recorded is no longer valid.
     if (dedupe_active_) {
@@ -3632,6 +3646,15 @@ class DrawsVulkanImpl final : public DrawsVulkan {
         REXLOG_WARN("[native] stale vertex reuse prevented: address {:08X}, {} bytes, "
                     "frame {}, discrepancy {}", source.address, source.bytes,
                     frame_, dedupe_.discrepancies());
+      }
+      // usf4_vertex_cache: a copy kept from an earlier frame, if the guest bytes are the same.
+      if (vertex_cache_.active() && type != 8 && !repacked && source.bytes >= kVertexCacheMinBytes &&
+          UseVertexCache(source.data, source.address, uint32_t(source.order), source.bytes,
+                         vertices_base_zero_ && entry->bindings.size() == 1 ? entry->bindings[0].stride : 4,
+                         offset)) {
+        offsets_vertices[b] = offset;
+        cached_bindings |= 1u << b;
+        continue;
       }
       // With a single binding, at a multiple of its stride (sa2_native_vertices_base_zero).
       if (vertices_base_zero_ && entry->bindings.size() == 1) {
@@ -4381,6 +4404,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       c.stencil[1] = stencil_back;
       c.n_bindings = uint32_t(entry->bindings.size());
       c.offsets_vertices = offsets_vertices;
+      c.cached_bindings = cached_bindings;
       c.with_indices = with_indices;
       c.indices_from_16 = indices_from_16;
       c.indices = uint32_t(indices_from_16 ? indices16_.size() : indices_.size());
@@ -4543,9 +4567,16 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     if (!entry->bindings.empty()) {
       // 16 identical pointers were filled in on every draw to bind one or two. It is filled when the upload
       // buffer changes (once per work slot), not 2,345 times per frame.
-      if (buffers_vertices_[0] != upload_) {
+      if (buffers_upload_filled_ != upload_) {
+        buffers_upload_filled_ = upload_;
         buffers_vertices_.fill(upload_);
         recorded_bindings_ = 0;  // the buffer changed: earlier bindings are stale
+      }
+      // usf4_vertex_cache: the bindings kept across frames come from their own buffer.
+      if (cached_bindings || buffers_cached_bound_) {
+        for (uint32_t i = 0; i < entry->bindings.size(); ++i)
+          buffers_vertices_[i] = (cached_bindings >> i) & 1 ? vc_buffer_ : upload_;
+        buffers_cached_bound_ = cached_bindings != 0;
       }
       /*
        * And do not bind again if it is exactly what is already bound.
@@ -4561,7 +4592,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       const uint32_t n_bindings = uint32_t(entry->bindings.size());
       bool equal = n_bindings == recorded_bindings_;
       for (uint32_t i = 0; equal && i < n_bindings; ++i) {
-        equal = a_bind[i] == offsets_recorded_[i];
+        equal = a_bind[i] == offsets_recorded_[i] && buffers_vertices_[i] == buffers_recorded_[i];
       }
       if (!equal) {
         SA2_SUB(8, dfn_.vkCmdBindVertexBuffers(cmd, 0, n_bindings, buffers_vertices_.data(), a_bind));
@@ -4569,6 +4600,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
         recorded_bindings_ = n_bindings;
         for (uint32_t i = 0; i < n_bindings; ++i) {
           offsets_recorded_[i] = a_bind[i];
+          buffers_recorded_[i] = buffers_vertices_[i];
         }
       }
       ++base_zero_total_;
@@ -4689,6 +4721,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     if (c.n_bindings) {
       std::array<VkBuffer, 16> buffers{};
       buffers.fill(c.buffer);
+      for (uint32_t i = 0; i < c.n_bindings; ++i)
+        if ((c.cached_bindings >> i) & 1) buffers[i] = vc_buffer_;  // usf4_vertex_cache
       dfn_.vkCmdBindVertexBuffers(cmd, 0, c.n_bindings, buffers.data(), c.offsets_vertices.data());
     }
     const uint32_t query = !diag_stats_draw_
@@ -5107,6 +5141,27 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                       "{} forgotten at a guest wait for the GPU", m[0] - report_dedupe_misses_[0],
                       m[1] - report_dedupe_misses_[1], m[2] - report_dedupe_misses_[2]);
     }
+    if (!first && vertex_cache_.active()) {
+      constexpr double kMB = 1048576.0;
+      SA2_REPORT_RING("[native] usf4_vertex_cache (10 s): {} reused after a hash ({:.1f} MB), {} reused again in the "
+                      "same frame, {:.1f} MB not copied in all; {} copied ({:.1f} MB), {:.1f} MB hashed; not cached: "
+                      "{} changing ranges, {} skipped, {} without room | buffer {:.1f} of {} MB, {} evicted, {} retired, "
+                      "{} blocked, {} replaced, {} wraps; upload buffer vertices {:.1f} MB",
+                      vc_hits_, double(vc_bytes_saved_) / kMB, vc_hits_frame_, double(vc_bytes_saved_) / kMB,
+                      vc_copies_, double(vc_bytes_copied_) / kMB, double(vc_bytes_hashed_) / kMB, vc_volatile_,
+                      vc_skipped_, vc_no_room_, double(vertex_cache_.used_bytes()) / kMB, vertex_cache_.size() >> 20,
+                      vertex_cache_.evicted() - report_vc_evicted_, vertex_cache_.retired() - report_vc_retired_,
+                      vertex_cache_.blocked() - report_vc_blocked_, vertex_cache_.replaced() - report_vc_replaced_,
+                      vertex_cache_.wraps() - report_vc_wraps_, double(bytes_vertices_ - report_vc_vertices_) / kMB);
+    }
+    vc_hits_ = vc_hits_frame_ = vc_hashes_ = vc_copies_ = vc_volatile_ = vc_skipped_ = vc_no_room_ = 0;
+    vc_bytes_saved_ = vc_bytes_hashed_ = vc_bytes_copied_ = 0;
+    report_vc_evicted_ = vertex_cache_.evicted();
+    report_vc_retired_ = vertex_cache_.retired();
+    report_vc_blocked_ = vertex_cache_.blocked();
+    report_vc_replaced_ = vertex_cache_.replaced();
+    report_vc_wraps_ = vertex_cache_.wraps();
+    report_vc_vertices_ = bytes_vertices_;
     report_dedupe_misses_ = dedupe_.misses();
     report_dedupe_queries_ = dedupe_.queries();
     report_dedupe_hits_ = dedupe_.hits();
@@ -5728,6 +5783,14 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       rex::ui::vulkan::util::FlushMappedMemoryRange(vulkan_device_, shared_memory_, shared_type_, 0,
                                                     shared_real_size_, shared_used_);
     }
+    if (vc_dirty_high_ > vc_dirty_low_) {  // usf4_vertex_cache: the ranges copied since the last submission
+      if (!coherent_upload_) {
+        rex::ui::vulkan::util::FlushMappedMemoryRange(vulkan_device_, vc_memory_, upload_type_, vc_dirty_low_,
+                                                      vc_real_size_, vc_dirty_high_ - vc_dirty_low_);
+      }
+      vc_dirty_low_ = ~VkDeviceSize(0);
+      vc_dirty_high_ = 0;
+    }
   }
 
   void UseSlot(uint32_t slot) override {
@@ -5754,7 +5817,11 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       shared_used_ = 0;
     }
     ++epoch_upload_;
+    // usf4_vertex_cache: this slot's previous submission has been waited for (BeginRecording -> Complete), and
+    // fences signal in submission order: every frame up to the one that last used this slot has finished.
+    vc_completed_frame_ = std::max(vc_completed_frame_, vc_slot_frames_[slot_current_]);
     ++frame_;
+    vc_slot_frames_[slot_current_] = frame_;
     CloseFrameOfTheGuardOfTheSky();
     // The upload buffer is reset here, so the recorded offsets are no longer valid. This also covers
     // SendAndWait, which goes through here.
@@ -8032,7 +8099,86 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                 REXCVAR_GET(sa2_native_upload_memory));
     MeasureMemoryUpload();
     CreateSharedSeparate();
+    CreateVertexCache();
     UseSlot(0);
+    return true;
+  }
+
+  // usf4_vertex_cache: the buffer whose vertex ranges survive the work slots (usf4_vertex_cache.h), in the upload
+  // buffers' memory type. If it cannot be made, vertices are copied as before.
+  void CreateVertexCache() {
+    if (!REXCVAR_GET(usf4_vertex_cache)) {
+      REXLOG_INFO("[native] usf4_vertex_cache: off");
+      return;
+    }
+    const VkDeviceSize bytes = VkDeviceSize(std::clamp(REXCVAR_GET(usf4_vertex_cache_mb), 4, 512)) << 20;
+    const bool created = CreateBufferUpload(bytes);
+    if (created) {
+      vc_buffer_ = upload_;
+      vc_memory_ = upload_memory_;
+      vc_real_size_ = upload_real_size_;
+      vc_data_ = upload_data_;
+      vertex_cache_.Init(bytes);
+    } else {
+      if (upload_ != VK_NULL_HANDLE) dfn_.vkDestroyBuffer(device_, upload_, nullptr);
+      if (upload_memory_ != VK_NULL_HANDLE) dfn_.vkFreeMemory(device_, upload_memory_, nullptr);
+    }
+    upload_ = VK_NULL_HANDLE;
+    upload_memory_ = VK_NULL_HANDLE;
+    upload_data_ = nullptr;
+    REXLOG_INFO("[native] usf4_vertex_cache: {}", created ? fmt::format("{} MB", bytes >> 20)
+                                                            : std::string("buffer NOT created, vertices copied as before"));
+  }
+
+  // usf4_vertex_cache: binds a copy of this range kept from an earlier frame if the guest bytes are the same, or
+  // copies it into the cache buffer. false = not cached (no room, a range that keeps changing): the caller copies it
+  // into the upload buffer as before.
+  bool UseVertexCache(const uint8_t* data, uint64_t address, uint32_t order, uint32_t bytes, uint64_t align,
+                      VkDeviceSize& offset) {
+    const uint32_t sync = g_synchronizations_ring.load(std::memory_order_relaxed);
+    auto found = vertex_cache_.Look(address, order, bytes);
+    usf4::native::VertexCache::Entry& e = *found.entry;
+    const bool live = found.same && vertex_cache_.Live(e);
+    if (found.same && e.skip_until > frame_) {
+      ++vc_skipped_;
+      return false;
+    }
+    if (live && e.checked_frame == frame_ && e.checked_sync == sync) {
+      // Already checked in this frame with no guest synchronization since: the guest cannot have rewritten it.
+      vertex_cache_.Use(e, frame_);
+      ++vc_hits_frame_;
+      vc_bytes_saved_ += bytes;
+      offset = e.offset;
+      return true;
+    }
+    const uint64_t hash = XXH3_64bits(data, bytes);
+    ++vc_hashes_;
+    vc_bytes_hashed_ += bytes;
+    if (live && e.hash == hash) {
+      e.checked_frame = frame_;
+      e.checked_sync = sync;
+      vertex_cache_.Use(e, frame_);
+      ++vc_hits_;
+      vc_bytes_saved_ += bytes;
+      offset = e.offset;
+      return true;
+    }
+    if (found.same && e.hash != hash && e.changes >= 2) {
+      e.skip_until = frame_ + 120;  // rewritten every time: copied as before, looked at again in 2 s
+      ++vc_volatile_;
+      return false;
+    }
+    if (!vertex_cache_.Allocate(bytes, align, vc_completed_frame_, offset)) {
+      ++vc_no_room_;
+      return false;
+    }
+    const WorkCopy work{data, vc_data_ + offset, bytes / 4, static_cast<xenos::Endian>(order)};
+    if (!active_copies_ || !EnqueueCopy(work)) CopyVertices(work);
+    vc_dirty_low_ = std::min<VkDeviceSize>(vc_dirty_low_, offset);
+    vc_dirty_high_ = std::max<VkDeviceSize>(vc_dirty_high_, offset + bytes);
+    vertex_cache_.Note(e, address, order, bytes, hash, frame_, sync);
+    ++vc_copies_;
+    vc_bytes_copied_ += bytes;
     return true;
   }
 
@@ -8088,10 +8234,10 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                 kSharedSize >> 20);
   }
 
-  bool CreateBufferUpload() {
+  bool CreateBufferUpload(VkDeviceSize size = kUploadSize) {
     VkBufferCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    info.size = kUploadSize;
+    info.size = size;
     // UNIFORM_BUFFER because it is also bound as a dynamic UBO (constants through UBOs, set 4).
     info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -13221,6 +13367,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     uint32_t stencil[2] = {};          // RB_STENCILREFMASK for front and back
     uint32_t n_bindings = 0;
     std::array<VkDeviceSize, 16> offsets_vertices{};
+    uint32_t cached_bindings = 0;  // usf4_vertex_cache: bit b = binding b from vc_buffer_
     bool with_indices = false;
     bool indices_from_16 = false;
     uint32_t indices = 0;
@@ -13281,7 +13428,23 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   uint64_t sky_position_max_ = 0;
   // The last binding made with vkCmdBindVertexBuffers, so it is not repeated.
   std::array<VkDeviceSize, 16> offsets_recorded_{};
+  std::array<VkBuffer, 16> buffers_recorded_{};  // usf4_vertex_cache: and the buffers they were made with
+  VkBuffer buffers_upload_filled_ = VK_NULL_HANDLE;  // buffers_vertices_ was filled with this upload buffer
+  bool buffers_cached_bound_ = false;  // buffers_vertices_ holds vc_buffer_ somewhere
   uint32_t recorded_bindings_ = 0;
+  uint64_t report_vc_evicted_ = 0, report_vc_retired_ = 0, report_vc_blocked_ = 0, report_vc_replaced_ = 0,
+           report_vc_wraps_ = 0, report_vc_vertices_ = 0;
+  // usf4_vertex_cache (usf4_vertex_cache.h).
+  usf4::native::VertexCache vertex_cache_;
+  VkBuffer vc_buffer_ = VK_NULL_HANDLE;
+  VkDeviceMemory vc_memory_ = VK_NULL_HANDLE;
+  VkDeviceSize vc_real_size_ = 0;
+  uint8_t* vc_data_ = nullptr;
+  VkDeviceSize vc_dirty_low_ = ~VkDeviceSize(0), vc_dirty_high_ = 0;  // copied since the last submission
+  std::array<uint64_t, kSlotsOfWork> vc_slot_frames_{};  // the frame that last used each upload slot
+  uint64_t vc_completed_frame_ = 0;  // every frame up to this one has finished on the GPU
+  uint64_t vc_hits_ = 0, vc_hits_frame_ = 0, vc_hashes_ = 0, vc_copies_ = 0, vc_volatile_ = 0, vc_skipped_ = 0,
+           vc_no_room_ = 0, vc_bytes_saved_ = 0, vc_bytes_hashed_ = 0, vc_bytes_copied_ = 0;
   // sa2_native_vertices_base_zero (see the cvar) and its guard.
   bool vertices_base_zero_ = true;           // the cvar, read once per frame (UseSlot)
   bool vertices_base_off_zero_ = false;  // the guard saw a difference: the rest of the session, as before
