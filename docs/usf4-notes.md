@@ -582,3 +582,12 @@ become one ImportColorDepthEDRAM4 over the column's rectangle; the shader maps t
 rectangle limits rasterization to the column, while the bookkeeping (stencil sources, synchronized versions,
 stencil-only clears) walks the original runs. PC with the Switch settings, 10 s of fight: 9-pass intervals 7014 ->
 823, depth-import intervals 7187 -> 1034, late fetches 4306 -> 625 (PC fight fps 15 -> 21 on this GPU-bound box).
+
+Console 0.6.0 (2026-10-15, CPU 1785, memory 2700, 540p): column imports active (per 10 s ~4180 imports replacing
+~74600 runs, 0 failed). At GPU 998.4: busy ~12.4 ms per Swap (edram_import9 2.7, edram_import 1.7, scene 3.1,
+copies 1.6, scene_no_z 1.1, 320 0.9, alias 0.5), gap ~4.4 ms, 59.5-59.9 fps. The saving was only ~0.8 ms: the
+remaining ~7 import9 intervals per frame still average ~0.36 ms each, so their cost is per pass (barriers,
+render pass switches, the copy-engine stencil path), not per tile.
+At GPU 768 (stock docked maximum): busy ~14.8 ms, gap ~2 ms, 59.8-59.9 fps; holds 60 apart from transition hitches.
+On a stage with many background characters at 998.4, fights ran 55-58 fps while the GPU had a ~5 ms gap per frame,
+so that slowdown comes from the CPU side (ring thread / game threads at 1785), not from the GPU.
