@@ -603,3 +603,6 @@ Fix: writable HostPathDevices are built from the directory listing alone (vfs_in
 gives name, type and size, 64 entries per IPC; cvar `vfs_light_scan_writable`, default true). Every entry gets
 the folder's timestamps, as an STFS package gives every entry its root's. The save log lines use ListLight too.
 PC: same 314 files and 16115897 bytes as before.
+Console 0.6.1 (1785 / 768): save mount 5.2-6.2 ms (was 216-570); no hitch next to the save opens any more. Fights
+59.9 fps, Status Monitor GPU load 88 %, cores 72 / 91 / 89 %. Hitches left: boot (300-480 ms) and the versus and
+stage loading screens (66-350 ms), while the game loads its own data.
