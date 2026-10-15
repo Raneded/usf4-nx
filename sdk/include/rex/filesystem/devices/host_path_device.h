@@ -13,7 +13,9 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
+#include <rex/filesystem.h>
 #include <rex/filesystem/device.h>
 
 namespace rex::filesystem {
@@ -66,6 +68,7 @@ class HostPathDevice : public Device {
 
  private:
   void PopulateEntry(HostPathEntry* parent_entry);
+  std::vector<rex::filesystem::FileInfo> ListChildren(const std::filesystem::path& path);
 
   // On-disk index of the tree (backlog U2, host_path_index.cpp). Read-only devices only.
   bool ActiveIndex() const;

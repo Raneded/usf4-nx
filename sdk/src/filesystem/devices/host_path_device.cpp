@@ -10,6 +10,7 @@
  */
 
 #include <rex/filesystem/devices/host_path_entry.h>
+#include "host_path_index.h"
 #include "startup_trace.h"
 
 #include <algorithm>
@@ -24,6 +25,10 @@
 #include <rex/string/utf8.h>
 
 REXCVAR_DECLARE(bool, vfs_redo_index);
+REXCVAR_DEFINE_BOOL(vfs_light_scan_writable, true, "Filesystem",
+                    "Writable folders (saves, profiles) are mounted from the directory listing alone "
+                    "(name, type, size), without a stat per file; every file gets the folder's timestamps, "
+                    "as an STFS package reports them. false = one stat per file, as before");
 
 namespace rex::filesystem {
 
@@ -226,8 +231,46 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
   return current_entry;
 }
 
+/*
+ * The save folder costs a stat per file to mount.
+ *
+ * Switch 0.6.0 (2026-10-15): USF4 opens its save ('SF4_SaveData', 314 files) before and after every
+ * fight, and each XamContentCreate mounts it again: 216-570 ms on the SD, ~0.7 ms per file, spent on
+ * the stat that ListFiles does to learn each size. The game's frame waits for it (the 180-420 ms
+ * hitches at round transitions, all next to an "[io] mounted ...SF4_SaveData" line).
+ * The directory listing itself already carries name, type and size (fsDirRead, 64 per IPC), so
+ * writable folders are built from that. The timestamps come from one stat of the folder: an STFS
+ * package (the real 360 save) gives every entry its root's timestamp too (stfs_container_device.cpp).
+ */
+std::vector<rex::filesystem::FileInfo> HostPathDevice::ListChildren(const std::filesystem::path& path) {
+  if (read_only_ || !REXCVAR_GET(vfs_light_scan_writable)) {
+    return rex::filesystem::ListFiles(path);
+  }
+  std::vector<vfs_index::LightEntry> light;
+  if (!vfs_index::ListLight(rex::path_to_utf8(path), &light)) {
+    return rex::filesystem::ListFiles(path);  // could not open it: the old path decides
+  }
+  rex::filesystem::FileInfo folder{};
+  rex::filesystem::GetInfo(path, &folder);
+  std::vector<rex::filesystem::FileInfo> result;
+  result.reserve(light.size());
+  for (auto& l : light) {
+    rex::filesystem::FileInfo info;
+    info.name = rex::to_path(l.name);
+    info.path = path;
+    info.type = l.is_directory ? rex::filesystem::FileInfo::Type::kDirectory
+                               : rex::filesystem::FileInfo::Type::kFile;
+    info.total_size = l.is_directory || l.size == ~uint64_t(0) ? 0 : l.size;
+    info.create_timestamp = folder.create_timestamp;
+    info.access_timestamp = folder.access_timestamp;
+    info.write_timestamp = folder.write_timestamp;
+    result.push_back(std::move(info));
+  }
+  return result;
+}
+
 void HostPathDevice::PopulateEntry(HostPathEntry* parent_entry) {
-  auto child_infos = rex::filesystem::ListFiles(parent_entry->host_path());
+  auto child_infos = ListChildren(parent_entry->host_path());
   for (auto& child_info : child_infos) {
     auto child = HostPathEntry::Create(this, parent_entry,
                                        parent_entry->host_path() / child_info.name, child_info);

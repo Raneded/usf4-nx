@@ -29,6 +29,8 @@
 #include <rex/system/xfile.h>
 #include <rex/system/xobject.h>
 
+#include "../../filesystem/devices/host_path_index.h"
+
 /*
  * Readable copy of the saves and a trace of what happens to them.
  *
@@ -85,19 +87,24 @@ std::string SafeName(const std::string_view original) {
 }
 
 // What is inside a container, for the log. It is the line that says whether the save has data or not.
+// Listed without a stat per file (ListLight: name, type and size come with the listing): with ListFiles
+// this line alone cost ~350 ms per open and per close of USF4's 314-file save on the Switch SD.
 std::string ThatHasInside(const std::filesystem::path& folder) {
   std::string text;
   uint64_t total = 0;
   uint32_t how_many = 0;
-  for (const auto& f : rex::filesystem::ListFiles(folder)) {
-    if (f.type != rex::filesystem::FileInfo::Type::kFile) {
+  std::vector<rex::filesystem::vfs_index::LightEntry> listed;
+  rex::filesystem::vfs_index::ListLight(rex::path_to_utf8(folder), &listed);
+  for (const auto& f : listed) {
+    if (f.is_directory) {
       continue;
     }
+    const uint64_t size = f.size == ~uint64_t(0) ? 0 : f.size;
     if (!text.empty()) {
       text += ", ";
     }
-    text += fmt::format("{} ({} B)", rex::path_to_utf8(f.name), f.total_size);
-    total += f.total_size;
+    text += fmt::format("{} ({} B)", f.name, size);
+    total += size;
     ++how_many;
   }
   if (how_many == 0) {

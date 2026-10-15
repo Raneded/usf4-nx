@@ -591,3 +591,15 @@ render pass switches, the copy-engine stencil path), not per tile.
 At GPU 768 (stock docked maximum): busy ~14.8 ms, gap ~2 ms, 59.8-59.9 fps; holds 60 apart from transition hitches.
 On a stage with many background characters at 998.4, fights ran 55-58 fps while the GPU had a ~5 ms gap per frame,
 so that slowdown comes from the CPU side (ring thread / game threads at 1785), not from the GPU.
+
+## Save-open hitches (0.6.1, 2026-10-15)
+
+Console 0.6.0 log (CPU 1785 / GPU 768): the longest transition hitches (183, 217, 417 ms) each sit next to an
+`[io] mounted '...SF4_SaveData'` line. USF4 opens its save (314 files, ~16 MB) before and after fights; every
+XamContentCreate mounted it again with PopulateEntry -> ListFiles, which stats each file (~0.7 ms each on the SD:
+216-570 ms per mount), and the `[save] open` / `[save] close` log lines listed the folder the same way
+(~350 ms each). The ring's "GPU fence" wait in those [hitch] lines spans exactly that time.
+Fix: writable HostPathDevices are built from the directory listing alone (vfs_index::ListLight: fsDirRead
+gives name, type and size, 64 entries per IPC; cvar `vfs_light_scan_writable`, default true). Every entry gets
+the folder's timestamps, as an STFS package gives every entry its root's. The save log lines use ListLight too.
+PC: same 314 files and 16115897 bytes as before.
