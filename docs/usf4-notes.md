@@ -678,3 +678,10 @@ src, r5 bytes, returns r3) and 0x8220EEA8 is the memset.
 - PC native run: 150 s training fight, ~190,000 native copies per second, frames look correct (lockstep frames only
   differ by the known game-state drift).
 - Switch fault handling: the host memcpy uses only LDP/STP/LDR/STR/LDUR/STUR, all decoded by rex_decode.h.
+
+Console result of 0.6.6 (2026-10-17, 1785 / 768): both routines "native" at start-up, ~0.98 M native copies per 10 s.
+The memcpy share of the main game thread fell from ~13 % to 3.5 %. The ~520-draw India stage holds 59.8 fps (0.6.4:
+58.1-59.7 on ~500-draw scenes); the ring now waits for the game 2-2.7 ms per Swap there (0.6.4: 0.5-1.4), i.e. the game
+thread hands frames over earlier. Cores in the screenshots 76 / 80 / 93 % (the ring core), GPU 92 %. User: "small
+improvements again". The SwitchWindowedAppContext::Initialize log lines (incl. "video recording off") come before the
+log file opens, so the recording switch cannot be confirmed from the log.
