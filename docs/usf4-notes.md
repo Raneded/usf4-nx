@@ -630,3 +630,21 @@ only 20-40 MB per 10 s still on the per-frame path. Fights 59-60 fps, Status Mon
 But the ring's work per Swap did not drop (~12.5 ms, 27 us per draw): XXH3 over the 5.6 MB checked per frame was
 ~10 % of the ring's samples (its NEON loop plus an out-of-line XXH_memcpy). 0.6.3 hashes with the CRC fingerprint
 (sa2_crc_fingerprint.h) on the Switch.
+
+### 0.6.4: vertex ranges trusted between checks; pipelines saved sooner (2026-10-16)
+
+Switch 0.6.3 at CPU 1785 / GPU 768 (Ryu vs Adon, night street; Ryu vs Guile): fights 57-58 / 59.9 fps, ring work per
+Swap 13.7-14.3 ms (500+ draws) / 12.5 ms (~410 draws), 27 us per draw as before. The cache reused 3-4.5 GB per 10 s but
+hashed all of it: Fingerprint64 was 15.8 % of the ring thread's samples (XXH3 in 0.6.2 ~10 %), so the faster hash did
+not help; reading ~6 MB of guest memory per frame costs about what the copy did.
+
+- usf4_vertex_cache_interval_max (8): a range that kept the same bytes in 2 checks in different frames is trusted
+  without a hash for 2, 4, then 8 frames (jittered), only while it is bound every frame; a gap (new round, stage,
+  loading) means a check first. A range found changed after being trusted is checked every frame (late_change).
+- usf4_vertex_cache_audit (test): trusted ranges are hashed anyway and differences counted. PC training fight, 150 s:
+  ~80,000 audited, 0 changed; hashed bytes 91 MB per 10 s against 954 MB reused.
+- PC lockstep is no longer usable for this: two runs with the same settings diverge in game state (gauges, poses),
+  probably since a fight run and a lockstep run shared the save folder (and out/pc/boot.log) concurrently. Do not run
+  fight_run.sh and lockstep_run.sh at the same time.
+- Pipelines: saved 15 s after any new one (was 60). In 0.6.3 Guile's special move compiled new pipelines (783 ms
+  frame) 20 s before the user quit, after the last save.

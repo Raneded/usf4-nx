@@ -16,6 +16,15 @@
 //   Within one frame, a range already checked is not hashed again until the guest synchronizes with the GPU
 //   (the same rule as the same-frame dedupe: before that, the game cannot legally rewrite what it drew).
 //
+// RECHECK INTERVAL (0.6.4)
+//   Hashing turned out to cost as much as the copy it saves: Switch 0.6.3, ~6 MB hashed per frame, the CRC
+//   fingerprint ~16 % of the ring thread, ring work per Swap unchanged. So a range is trusted without a hash,
+//   like a stable texture (sa2_native_texture_interval_max): after 2 checks in a row in different frames that found
+//   the same bytes, it is checked again after 2, then 4, then up to usf4_vertex_cache_interval_max frames.
+//   Only while it is drawn without a gap: a range not bound in the previous frame (a new round, a new stage, a
+//   loading screen in between) is checked first. A range found changed after it had been trusted is checked every
+//   frame from then on (late_change), as sa2_native_adaptive_texture does for textures.
+//
 // WHY THE GPU NEVER READS A RANGE WHILE IT IS REWRITTEN
 //   A copy is never written in place: a changed range goes to a new allocation. Space is handed out from a
 //   ring, oldest first, and an allocation is only reused when the last frame that bound it has finished on
@@ -57,6 +66,10 @@ class VertexCache {
     uint32_t checked_sync = 0;
     uint32_t bytes = 0;
     uint32_t changes = 0;     // consecutive copies with a different hash
+    uint64_t seen_frame = 0;  // the last frame that bound it
+    uint64_t next_check = 0;  // trusted without a hash before this frame (while seen in the previous frame)
+    uint32_t stable = 0;      // checks in a row, in different frames, that found the same bytes
+    bool late_change = false; // changed after it had been trusted: checked every frame
     bool used = false;
   };
 
@@ -139,7 +152,11 @@ class VertexCache {
       e.changes = e.hash == hash ? 0 : e.changes + 1;
     } else {
       e.changes = 0;
+      e.late_change = false;
     }
+    e.stable = 0;
+    e.next_check = 0;
+    e.seen_frame = frame;
     if (Allocation* old = e.used ? AllocationOf(e.id) : nullptr) old->live = false;
     e.used = true;
     e.key = key;
@@ -153,6 +170,26 @@ class VertexCache {
     allocations_.back().slot = uint32_t(&e - table_.data());
   }
 
+
+  // A check in `frame` found the same bytes: when the next one is due. `max` = usf4_vertex_cache_interval_max.
+  static void Stable(Entry& e, uint64_t frame, uint32_t max) {
+    if (e.checked_frame != frame) ++e.stable;
+    e.seen_frame = frame;
+    if (e.late_change || max < 2 || e.stable < 2) {
+      e.next_check = 0;
+      return;
+    }
+    uint32_t interval = e.stable >= 6 ? 32u : 1u << (e.stable - 1);  // 2, 4, 8, 16, then 32
+    interval = interval < max ? interval : max;
+    // Spread: ranges that became stable together (a new stage) are not all checked in the same frame.
+    const uint32_t jitter = interval >= 4 ? uint32_t(e.key >> 4) & (interval / 2 - 1) : 0;
+    e.next_check = frame + interval - jitter;
+  }
+
+  // May this range be bound in `frame` without a hash?
+  static bool Trusted(const Entry& e, uint64_t frame) {
+    return frame < e.next_check && e.seen_frame + 1 >= frame;
+  }
 
   // Counters for the report.
   uint64_t evicted() const { return evicted_; }

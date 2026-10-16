@@ -1055,6 +1055,14 @@ REXCVAR_DEFINE_BOOL(usf4_vertex_cache, true, "SA2 renderer",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(usf4_vertex_cache_mb, 24, "SA2 renderer", "Size of the usf4_vertex_cache buffer, in MB")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(usf4_vertex_cache_interval_max, 8, "SA2 renderer",
+                     "Longest interval, in frames, between hashes of a vertex range that keeps the same bytes while it "
+                     "is drawn every frame (usf4_vertex_cache.h). A range found changed after that is hashed every "
+                     "frame. 1 = hashed every frame, as 0.6.3")
+    .range(1, 32);
+REXCVAR_DEFINE_BOOL(usf4_vertex_cache_audit, false, "SA2 renderer",
+                    "Test: ranges trusted without a hash (usf4_vertex_cache_interval_max) are hashed anyway; a "
+                    "difference is counted and logged, and the range is copied again (so the image stays right)");
 REXCVAR_DEFINE_BOOL(sa2_shared_native_cache, true, "SA2 renderer",
                     "Native renderer: the per-draw shared constants (488 bytes) "
                     "in a small buffer WITH CPU cache, separate from the upload buffer. Measured in build 155: writing them without "
@@ -5143,19 +5151,28 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     }
     if (!first && vertex_cache_.active()) {
       constexpr double kMB = 1048576.0;
-      SA2_REPORT_RING("[native] usf4_vertex_cache (10 s): {} reused after a hash ({:.1f} MB), {} reused again in the "
-                      "same frame, {:.1f} MB not copied in all; {} copied ({:.1f} MB), {:.1f} MB hashed; not cached: "
+      SA2_REPORT_RING("[native] usf4_vertex_cache (10 s): {} reused after a hash ({:.1f} MB), {} trusted without a "
+                      "hash ({:.1f} MB), {} reused again in the same frame, {:.1f} MB not copied in all; {} copied ({:.1f} MB), {:.1f} MB hashed; not cached: "
                       "{} changing ranges, {} skipped, {} without room | buffer {:.1f} of {} MB, {} evicted, {} retired, "
                       "{} blocked, {} replaced, {} wraps; upload buffer vertices {:.1f} MB",
-                      vc_hits_, double(vc_bytes_saved_) / kMB, vc_hits_frame_, double(vc_bytes_saved_) / kMB,
+                      vc_hits_, double(vc_bytes_saved_ - vc_bytes_trusted_) / kMB, vc_trusted_,
+                      double(vc_bytes_trusted_) / kMB, vc_hits_frame_, double(vc_bytes_saved_) / kMB,
                       vc_copies_, double(vc_bytes_copied_) / kMB, double(vc_bytes_hashed_) / kMB, vc_volatile_,
                       vc_skipped_, vc_no_room_, double(vertex_cache_.used_bytes()) / kMB, vertex_cache_.size() >> 20,
                       vertex_cache_.evicted() - report_vc_evicted_, vertex_cache_.retired() - report_vc_retired_,
                       vertex_cache_.blocked() - report_vc_blocked_, vertex_cache_.replaced() - report_vc_replaced_,
                       vertex_cache_.wraps() - report_vc_wraps_, double(bytes_vertices_ - report_vc_vertices_) / kMB);
     }
+    if (!first && vertex_cache_.active() && REXCVAR_GET(usf4_vertex_cache_audit)) {
+      SA2_REPORT_RING("[native] usf4_vertex_cache audit (10 s): {} trusted ranges hashed anyway, {} had changed "
+                      "({} since the start)", vc_audit_ok_ + vc_audit_stale_ - report_vc_audit_,
+                      vc_audit_stale_ - report_vc_audit_stale_, vc_audit_stale_);
+      report_vc_audit_ = vc_audit_ok_ + vc_audit_stale_;
+      report_vc_audit_stale_ = vc_audit_stale_;
+    }
     vc_hits_ = vc_hits_frame_ = vc_hashes_ = vc_copies_ = vc_volatile_ = vc_skipped_ = vc_no_room_ = 0;
     vc_bytes_saved_ = vc_bytes_hashed_ = vc_bytes_copied_ = 0;
+    vc_trusted_ = vc_bytes_trusted_ = 0;
     report_vc_evicted_ = vertex_cache_.evicted();
     report_vc_retired_ = vertex_cache_.retired();
     report_vc_blocked_ = vertex_cache_.blocked();
@@ -5959,11 +5976,13 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       pipelines_no_save_ += compiled - prewarmed_counted_;
       prewarmed_counted_ = compiled;
     }
-    // The pipeline cache is saved after 64 new pipelines, or after a minute with any new one: on the
-    // Switch, exiting does not always reach the destructor.
+    // The pipeline cache is saved after 64 new pipelines, or 15 s after any new one: on the Switch, exiting
+    // does not always reach the destructor. usf4 0.6.4: was a minute; Switch 0.6.3 (2026-10-16) compiled Guile's
+    // special-move pipelines (a 783 ms frame) 20 s before the user quit, after the last save, so the next session
+    // would have compiled them again. The file is written on its own thread (~130 ms, no frame waits for it).
     if (pipelines_no_save_ &&
         (pipelines_no_save_ >= 64 ||
-         std::chrono::steady_clock::now() - cache_saved_ >= std::chrono::seconds(60))) {
+         std::chrono::steady_clock::now() - cache_saved_ >= std::chrono::seconds(15))) {
       SaveCachePipelines();
     }
   }
@@ -8151,6 +8170,35 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       offset = e.offset;
       return true;
     }
+    if (live && usf4::native::VertexCache::Trusted(e, frame_)) {
+      // Stable and drawn every frame: not hashed before e.next_check (usf4_vertex_cache_interval_max).
+      bool trust = true;
+      if (REXCVAR_GET(usf4_vertex_cache_audit)) {
+#if SA2_CRC_FINGERPRINT
+        const uint64_t check = sa2::native::crc_fingerprint::Fingerprint64(data, bytes, 0);
+#else
+        const uint64_t check = XXH3_64bits(data, bytes);
+#endif
+        if (check != e.hash) {
+          trust = false;
+          if (++vc_audit_stale_ <= 32) {
+            REXLOG_WARN("[native] usf4_vertex_cache audit: {:08X} ({} bytes, order {}) changed {} frames before its "
+                        "check (stable {})", uint32_t(address), bytes, order, e.next_check - frame_, e.stable);
+          }
+        } else {
+          ++vc_audit_ok_;
+        }
+      }
+      if (trust) {
+        e.seen_frame = frame_;
+        vertex_cache_.Use(e, frame_);
+        ++vc_trusted_;
+        vc_bytes_trusted_ += bytes;
+        vc_bytes_saved_ += bytes;
+        offset = e.offset;
+        return true;
+      }
+    }
     // The CRC fingerprint (sa2_crc_fingerprint.h, 2^-64 odds, ~4 bytes/cycle on the A57): XXH3 here was ~10 % of the
     // Switch ring thread in 0.6.2 (5.6 MB per frame, its NEON loop plus an out-of-line XXH_memcpy).
 #if SA2_CRC_FINGERPRINT
@@ -8161,6 +8209,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     ++vc_hashes_;
     vc_bytes_hashed_ += bytes;
     if (live && e.hash == hash) {
+      usf4::native::VertexCache::Stable(e, frame_, uint32_t(REXCVAR_GET(usf4_vertex_cache_interval_max)));
       e.checked_frame = frame_;
       e.checked_sync = sync;
       vertex_cache_.Use(e, frame_);
@@ -8169,6 +8218,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       offset = e.offset;
       return true;
     }
+    if (live && e.stable >= 2) e.late_change = true;  // changed after it had been trusted (Note keeps the flag)
+    e.next_check = 0;
     if (found.same && e.hash != hash && e.changes >= 2) {
       e.skip_until = frame_ + 120;  // rewritten every time: copied as before, looked at again in 2 s
       ++vc_volatile_;
@@ -13451,6 +13502,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   uint64_t vc_completed_frame_ = 0;  // every frame up to this one has finished on the GPU
   uint64_t vc_hits_ = 0, vc_hits_frame_ = 0, vc_hashes_ = 0, vc_copies_ = 0, vc_volatile_ = 0, vc_skipped_ = 0,
            vc_no_room_ = 0, vc_bytes_saved_ = 0, vc_bytes_hashed_ = 0, vc_bytes_copied_ = 0;
+  uint64_t vc_trusted_ = 0, vc_bytes_trusted_ = 0;  // bound without a hash (usf4_vertex_cache_interval_max)
+  uint64_t vc_audit_ok_ = 0, vc_audit_stale_ = 0, report_vc_audit_ = 0, report_vc_audit_stale_ = 0;
   // sa2_native_vertices_base_zero (see the cvar) and its guard.
   bool vertices_base_zero_ = true;           // the cvar, read once per frame (UseSlot)
   bool vertices_base_off_zero_ = false;  // the guard saw a difference: the rest of the session, as before
