@@ -64,6 +64,7 @@ set(USF4_SOURCES
     src/usf4_tiling.cpp
     src/usf4_gpu_wait.cpp
     src/usf4_job_pop_yield.cpp
+    src/usf4_native_copy.cpp
     # The SA2-only parts of the renderer glue that are not ported (native Direct3D layer, census): off.
     src/me/usf4_api_stubs.cpp
     # Render resolution per console mode (docked / handheld) and MSAA: sa2_render_height_*, sa2_msaa.
@@ -231,6 +232,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "Thorhax"
-        VERSION "0.6.5"
+        VERSION "0.6.6"
         ICON "${USF4_NRO_ICON}")
 endif()

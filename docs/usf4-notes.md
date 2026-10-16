@@ -662,3 +662,19 @@ Remaining CPU in fights (0.6.4 profile): ring 71 % of a core (Draw 10.9 %, memcp
 WriteConstantRunRaw 3.1 %, PM4 parsing ~5 %, EDRAM4 bookkeeping ~5.5 %, malloc/free/mutex ~7 %); main game thread 71 %
 (guest code, spread over many functions; largest sub_8220FFE8 7 %). The test builds also run the 1 ms stack sampler
 (switch_profile_stacks) and per-category GPU timestamps (sa2_gpu_marks_categories), both diagnostic costs.
+
+### 0.6.6: the game's memcpy routines run as the host's memcpy (2026-10-16)
+
+In the 0.6.4 console profile the main game thread (71 % of a core) spent ~13 % in the Xbox 360 C library's copy
+routines: sub_8220FFE8 7.1 % (with its VMX helper sub_822140C0 2.3 %) and sub_82514750 3.6 % (also 3-4 % of the job
+workers). Note: the "memset 0x8220FFE8" in the Direct3D section above is wrong; 0x8220FFE8 is a memcpy (r3 dst, r4
+src, r5 bytes, returns r3) and 0x8220EEA8 is the memset.
+
+- app/src/usf4_native_copy.cpp, CPU enhancement usf4_cpu_native_memcpy (on): both routines copy with the host memcpy
+  when the ranges do not overlap and do not wrap; otherwise the original runs. Guest code checked by FNV-1a
+  (760 / 1160 bytes). tools/direct_calls.py --redo makes the 376 + 2,119 call sites call the hooks.
+- usf4_cpu_native_memcpy_audit (test): PC boot + training fight, ~14.5 M copies compared after the original ran,
+  0 differences; 9,391 overlapping calls of sub_82514750 (left to the original).
+- PC native run: 150 s training fight, ~190,000 native copies per second, frames look correct (lockstep frames only
+  differ by the known game-state drift).
+- Switch fault handling: the host memcpy uses only LDP/STP/LDR/STR/LDUR/STUR, all decoded by rex_decode.h.
