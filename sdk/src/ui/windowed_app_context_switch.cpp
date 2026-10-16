@@ -11,12 +11,20 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ui/window_switch.h>
 
 #include <switch.h>
 
 #include "rex/ui/switch_saltynx.h"
+
+// usf4 0.6.5: on the user's console (2026-10-16), holding Capture to record a clip crashed the game, "too often".
+// The game uses nearly all of the application memory (3281 of 3285 MB), and the system records with the running
+// application's resources. This turns recording off the way games do for scenes they do not want recorded (the
+// capture button then says the software does not allow it). Screenshots are not affected.
+REXCVAR_DEFINE_BOOL(switch_video_recording, false, "Switch",
+                    "Allow video clips (hold Capture). Off by default: recording crashed the game on the console");
 
 namespace rex::ui {
 
@@ -88,6 +96,14 @@ bool SwitchWindowedAppContext::Initialize() {
   Result rc = appletSetFocusHandlingMode(AppletFocusHandlingMode_SuspendHomeSleepNotify);
   if (R_FAILED(rc)) {
     REXLOG_WARN("Switch: appletSetFocusHandlingMode failed: 0x{:08X}", rc);
+  }
+  if (!REXCVAR_GET(switch_video_recording)) {
+    rc = appletSetGamePlayRecordingState(false);
+    if (R_FAILED(rc)) {
+      REXLOG_WARN("Switch: could not turn video recording off: 0x{:08X}", rc);
+    } else {
+      REXLOG_INFO("Switch: video recording off (switch_video_recording = false)");
+    }
   }
   appletHook(&impl_->hook_cookie, AppletHookCallback, this);
   impl_->hooked = true;

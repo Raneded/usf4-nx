@@ -648,3 +648,17 @@ not help; reading ~6 MB of guest memory per frame costs about what the copy did.
   fight_run.sh and lockstep_run.sh at the same time.
 - Pipelines: saved 15 s after any new one (was 60). In 0.6.3 Guile's special move compiled new pipelines (783 ms
   frame) 20 s before the user quit, after the last save.
+
+### 0.6.5: video recording off (2026-10-16)
+
+Switch 0.6.4 at 1785 / 768: fights 59.3-59.8 fps; on ~500-draw scenes the ring did 12.2 ms per Swap (24.4 us per draw;
+0.6.3: 14.0 ms, 27.3 us). Fingerprint64 fell from 15.8 % to 5.1 % of the ring thread; ~3.4 GB per 10 s trusted
+without a hash, ~0.55 GB hashed. The user: "much smoother yet again". The user also reported that holding Capture to
+record a clip crashed the game, "too often" (the log just stops; application memory 3281 of 3285 MB). 0.6.5 calls
+appletSetGamePlayRecordingState(false) at start-up (cvar switch_video_recording, default false; screenshots still
+work).
+
+Remaining CPU in fights (0.6.4 profile): ring 71 % of a core (Draw 10.9 %, memcpy 5.4 %, Fingerprint64 5.1 %,
+WriteConstantRunRaw 3.1 %, PM4 parsing ~5 %, EDRAM4 bookkeeping ~5.5 %, malloc/free/mutex ~7 %); main game thread 71 %
+(guest code, spread over many functions; largest sub_8220FFE8 7 %). The test builds also run the 1 ms stack sampler
+(switch_profile_stacks) and per-category GPU timestamps (sa2_gpu_marks_categories), both diagnostic costs.
