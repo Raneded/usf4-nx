@@ -13,8 +13,8 @@ their own disc.
 ## Status
 
 - **PC (Windows):** boots, menus and fights work with the native Vulkan renderer at 60 fps.
-- **Switch (Atmosphère, homebrew NRO):** fights hold 60 fps at 540p with CPU 1785 MHz and GPU 998.4 MHz (overclocked,
-  sys-clk). Work continues on lowering the GPU and memory clocks this needs.
+- **Switch (Atmosphère, homebrew NRO):** fights hold 60 fps at 540p with CPU 1785 MHz and GPU 768 MHz, the top
+  docked-mode clocks (set with sys-clk; tested with memory at 2700 MHz). Video clip recording is turned off.
 
 Version history, measurements and every finding: [docs/usf4-notes.md](docs/usf4-notes.md).
 
