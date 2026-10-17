@@ -810,3 +810,15 @@ textures stage 2.4 -> 1.3-1.5 us per draw; fights 60.0-60.3 fps, CPU total 178-1
 recording worker 29 %, Status Monitor cores 53 / 56 / 73 %, GPU 79 %. User: no glitches. (Fewer draws than the earlier
 stages, so the totals are not directly comparable.) Remaining draw stages per draw: uploads 2.8-3.2 us, targets /
 indices / vertices 2.4-2.9, record 1.9, framing 1.5.
+
+### 0.7.3 diagnostics: what the fight hitches are (2026-10-17)
+
+`[hitch]` line (usf4_frame_counter.cpp, frames over usf4_hitch_log_ms = 25): the main thread's wall time split into GPU
+ring waits (usf4_gpu_wait iteration), job waits (sub_82966C90's Sleep(0)), the frame limiter, and the rest. The
+profiler's hitch windows now start at 30 ms (were 45). Console run (0.7.3 profiling build, 2026-10-17, ~2 min of fights
+at 60-63 fps): in fights 1 frame of 42-50 ms every ~15-30 s (the user noticed none). All but one are "the rest": the
+game's own work on the main thread, not a wait on the renderer (e.g. 44.2 ms: GPU 0.0, jobs 0.7, rest 43.6). One at the
+end of a match was 35.5 ms of waiting for the game's jobs while it opened its save data (XamContentCreate right after).
+Frames right after a long one sometimes wait 18-23 ms for the GPU ring (the ring catching up: a 66 ms ring frame with
+60 new textures, 14 MB, at a new effect). The stack samples caught nothing inside single ~45 ms windows (too few
+samples per window). Not pursued: they are the game's own loads / effect set-up.
