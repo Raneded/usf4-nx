@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <rex/graphics/pipeline/shader/interpreter.h>
+#include <rex/platform.h>
 #include <rex/system/xmemory.h>
 #include <rex/ui/graphics_util.h>
 
@@ -52,7 +53,8 @@ class NativeDrawExtentEstimator {
   // Whether `length` bytes of guest physical memory at `physical` can be read through physical_membase().
   bool PhysicalReadable(uint32_t physical, uint32_t length) const {
     if (!length || physical >= 0x20000000u || length > 0x20000000u - physical) return false;
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(__linux__) || REX_PLATFORM_SWITCH
+    // usf4 0.6.7: the Switch too; its QueryProtect (RexGmQueryProtect) was ~1 % of the console ring thread.
     // VirtualQuery computes the region size by walking the page tables across every page with the same attributes
     // (hundreds of MB of the physical mapping), which was 87 % of the ring thread on PC. The physical heap's page
     // table records the same commit and protection for physical_membase().

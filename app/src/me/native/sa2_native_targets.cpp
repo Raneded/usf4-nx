@@ -533,6 +533,40 @@ const uint32_t me_edram_depth_msaa2_to_stencil_1x_fs[] = {
 
 namespace {
 
+// usf4 0.6.7: a working list kept between calls instead of a std::vector allocated per call. operator new and
+// malloc's lock in SynchronizeEDRAM4, CopyTilesEDRAM4 and RedirectClearDepthEDRAM4 showed in the console ring
+// profile (0.6.6). One kept vector per nesting level and element type (these functions can run inside each other,
+// e.g. a stencil import synchronizing its source); deeper than kLevels, a plain local vector. Ring thread only.
+template <typename T>
+class KeptList {
+ public:
+  KeptList() : level_(Level()++) {
+    list_ = level_ < kLevels ? &Pool()[level_] : &own_;
+    list_->clear();
+  }
+  ~KeptList() {
+    list_->clear();
+    --Level();
+  }
+  KeptList(const KeptList&) = delete;
+  KeptList& operator=(const KeptList&) = delete;
+  std::vector<T>& get() { return *list_; }
+
+ private:
+  static constexpr int kLevels = 4;
+  static int& Level() {
+    static thread_local int level = 0;
+    return level;
+  }
+  static std::array<std::vector<T>, kLevels>& Pool() {
+    static thread_local std::array<std::vector<T>, kLevels> pool;
+    return pool;
+  }
+  int level_;
+  std::vector<T>* list_;
+  std::vector<T> own_;
+};
+
 namespace xenos = rex::graphics::xenos;
 using rex::ui::vulkan::VulkanDevice;
 using rex::ui::vulkan::VulkanPresenter;
@@ -4406,7 +4440,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       return (*versions_target)[physical & kMaskEDRAM4] == version;
     };
     // Phase 1 collects the runs (tile-row pieces) to transfer; phase 2 records them.
-    std::vector<SpanEDRAM4> spans;
+    KeptList<SpanEDRAM4> spans_kept;  // usf4 0.6.7, see KeptList
+    std::vector<SpanEDRAM4>& spans = spans_kept.get();
     // Full-width areas are one contiguous span (a transfer run may cross rows, as before).
     const bool complete_width = has_range && range.tx0 == 0 && range.tx1 == range.pitch;
     const uint32_t ty_end = complete_width ? range.ty0 + 1 : range.ty1;
@@ -4574,8 +4609,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                src.edram_format != target.edram_format || src.edram_msaa_x != target.edram_msaa_x ||
                src.edram_msaa_y != target.edram_msaa_y || !target.accepts_target_of_copy;
       };
-      std::vector<SpanEDRAM4> merged;
-      merged.reserve(spans.size());
+      KeptList<SpanEDRAM4> merged_kept;
+      std::vector<SpanEDRAM4>& merged = merged_kept.get();
       for (size_t i = 0; i < spans.size();) {
         VkRect2D first{};
         size_t j = i + 1;
@@ -4617,7 +4652,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
         merged.push_back(std::move(column));
         i = j;
       }
-      spans = std::move(merged);
+      spans.swap(merged);
     }
     const bool batch = REXCVAR_GET(sa2_native_edram4_batch) && spans.size() > 1 && !edram4_batch_.active &&
         slots_[slot_].conversions_edram + 2 * spans.size() + 16 < kConversionsEDRAMPerSlot;
@@ -4807,14 +4842,17 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     if (!copy_image_ || source.scale_q != target.scale_q) return false;
     const uint32_t tile_width = 80u >> (uint32_t(target.edram_64bpp) + target.edram_msaa_x);
     const uint32_t tile_height = 16u >> target.edram_msaa_y;
-    std::vector<VkImageCopy> regions;
+    // usf4 0.6.7: working lists kept between calls (KeptList).
+    KeptList<VkImageCopy> regions_kept;
+    std::vector<VkImageCopy>& regions = regions_kept.get();
     // usf4-nx (usf4_copy_tiles_merged): tiles that are neighbours in both images go in one rectangle (a row of tiles,
     // then rows of the same span): the same pixels with far fewer regions. NVK copies colour images region by
     // region through vk_meta (pipeline, two temporary views, a descriptor set, a render pass and a draw each): a
     // fight frame had ~16,000 one-tile regions.
     static const bool merged = REXCVAR_GET(usf4_copy_tiles_merged);
     struct Rect { uint32_t sx, sy, dx, dy, w, h; };
-    std::vector<Rect> rects;
+    KeptList<Rect> rects_kept, stacked_kept;
+    std::vector<Rect>& rects = rects_kept.get();
     for (uint32_t i = 0; i < count; ++i) {
       const uint32_t so = source_start + i, sd = target_start + i;
       const uint32_t sx = (so % PitchTilesEDRAM(source)) * tile_width;
@@ -4840,8 +4878,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
     }
     if (merged && rects.size() > 1) {
       // Rows of the same span, one below the other in both images.
-      std::vector<Rect> stacked;
-      stacked.reserve(rects.size());
+      std::vector<Rect>& stacked = stacked_kept.get();
       for (const Rect& r : rects) {
         bool joined = false;
         for (auto it = stacked.rbegin(); it != stacked.rend() && it->sy + it->h >= r.sy; ++it) {
@@ -5095,7 +5132,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       VkRect2D area2{};  // a partial tile of a color owner can map to two rects (depth/color half-tile swap)
       bool partial = false;
     };
-    std::vector<Region> regions;
+    KeptList<Region> regions_kept;  // KeptList: see its comment
+    std::vector<Region>& regions = regions_kept.get();
     // Target of a tile: its current owner if that is another depth view; if the drawn view itself owns it
     // (or nobody does), the drawn view's known 1x alias, which then becomes the owner.
     const auto alias_it = edram4_alias_1x_.find(drawn);
@@ -5232,7 +5270,8 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       Image* w;
       VkRect2D rect;
     };
-    std::vector<MergedClear> merged;
+    KeptList<MergedClear> merged_kept;
+    std::vector<MergedClear>& merged = merged_kept.get();
     const auto add_clear = [&](Image* w, const VkRect2D& rect) {
       for (auto& m : merged) {
         if (m.w == w && m.rect.offset.x == rect.offset.x && m.rect.extent.width == rect.extent.width &&

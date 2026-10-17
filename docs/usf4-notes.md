@@ -685,3 +685,20 @@ The memcpy share of the main game thread fell from ~13 % to 3.5 %. The ~520-draw
 thread hands frames over earlier. Cores in the screenshots 76 / 80 / 93 % (the ring core), GPU 92 %. User: "small
 improvements again". The SwitchWindowedAppContext::Initialize log lines (incl. "video recording off") come before the
 log file opens, so the recording switch cannot be confirmed from the log.
+
+### 0.6.7: fewer allocations on the ring thread (2026-10-17)
+
+From the 0.6.6 console profile's stacks, the ring thread's heap traffic came from: per-call std::vectors in
+SynchronizeEDRAM4 (spans, merged), CopyTilesEDRAM4 (regions, rects, stacked) and RedirectClearDepthEDRAM4 (regions,
+merged), each an operator new + malloc's recursive lock (rmutexLock); and paired_packets_ in me_native_system.cpp, an
+unordered_map that got a node for every new command-buffer address and was never emptied.
+
+- KeptList<T> (sa2_native_targets.cpp): one kept vector per nesting level and element type (the EDRAM functions can
+  run inside each other), cleared on entry and exit.
+- paired_packets_: an 8192-slot linear-probing table; entries of earlier frames count as empty (only the current
+  frame's were ever used).
+- NativeDrawExtentEstimator::PhysicalReadable: the Switch now uses the physical heap's page table, like PC/Windows,
+  instead of RexGmQueryProtect (~1 % of the ring thread).
+- PC checks: tiled fight (pairing path) 48,480 replays reusing a pairing, 0.327 dropped by predicate per replay as in
+  earlier tiled runs; Switch-settings fight, 0 draw failures; lockstep frames match 0.6.6 apart from a hit spark.
+- Not changed: NVK's vk_meta object frees at command-buffer reset (from vkCmdCopyImage through vk_meta).

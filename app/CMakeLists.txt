@@ -232,6 +232,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "Thorhax"
-        VERSION "0.6.6"
+        VERSION "0.6.7"
         ICON "${USF4_NRO_ICON}")
 endif()

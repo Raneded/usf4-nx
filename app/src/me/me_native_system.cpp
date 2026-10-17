@@ -3113,25 +3113,24 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
       // usf4-nx: remember the pairing for the predicated-tiling replays of this packet (below), as the queue path
       // does. PairByAddress consumes the draw's record, so without this tiles 2-3 found neither a record nor a
       // remembered pairing and drew with the ring's own pick (USF4's hit effects: VS n78 instead of n434).
-      paired_packets_[packet_address_] = {swaps_, draw_vs_, draw_ps_};
+      NotePairedPacket({swaps_, draw_vs_, draw_ps_});
       return;
     }
     // Predicated tiling replays the same command buffer once per EDRAM tile: a DRAW_INDX packet at an
     // address already paired in this frame reuses that pairing and consumes no record.
-    if (auto it = paired_packets_.find(packet_address_);
-        it != paired_packets_.end() && it->second.frame == swaps_) {
+    if (auto it = FindPairedPacket(); it) {
       // usf4-nx: the replay is the same packet with the same state, so it takes the first tile's vertex shader
       // whenever that one still matches the loaded microcode. PreferVertexShaderCandidate kept the ring's current
       // entry when both matched: two library shaders that differ only in their vertex fetches (masked by the
       // identity check) then drew tile 1 with the bound object's shader and tiles 2-3 with the other, whose vertex
       // layout gave USF4's hit effects their black bars (PS n538 with VS n434 in tile 1, n78 in tiles 2-3; frame
       // trace, 2026-10-11). SA2 has no predicated tiling, so the path was never taken there.
-      if (it->second.vs && AcceptVertexShaderIdentity(it->second.vs, "pair-replay"))
-        draw_vs_ = it->second.vs;
+      if (it->vs && AcceptVertexShaderIdentity(it->vs, "pair-replay"))
+        draw_vs_ = it->vs;
       else
-        draw_vs_ = PreferVertexShaderCandidate(draw_vs_, it->second.vs, "pair-replay");
-      if (it->second.ps && AcceptPixelShaderIdentity(it->second.ps, "pair-replay"))
-        draw_ps_ = it->second.ps;
+        draw_vs_ = PreferVertexShaderCandidate(draw_vs_, it->vs, "pair-replay");
+      if (it->ps && AcceptPixelShaderIdentity(it->ps, "pair-replay"))
+        draw_ps_ = it->ps;
       ++draws_replayed_;
       return;
     }
@@ -3159,7 +3158,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
       ++draws_paired_;
       draw_vs_ = PreferVertexShaderCandidate(draw_vs_, vs, "pair-queue");
       if (ps && AcceptPixelShaderIdentity(ps, "pair-queue")) draw_ps_ = ps;
-      paired_packets_[packet_address_] = {swaps_, draw_vs_, ps};
+      NotePairedPacket({swaps_, draw_vs_, ps});
       return;
     }
     ++draws_unpaired_;
@@ -4013,7 +4012,38 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
     const sa2::native::ShaderEntry* vs;
     const sa2::native::ShaderEntry* ps;
   };
-  std::unordered_map<uint32_t, PairedPacket> paired_packets_;
+  // usf4 0.6.7: the packets paired in this frame, by command-buffer address, in a fixed table (linear probing)
+  // whose entries of earlier frames count as empty. It was an unordered_map never emptied: a node allocation for
+  // every new address (operator new under PairDraw in the console ring profile) and unbounded growth. Only
+  // entries of the current frame were ever used. A frame with more paired packets than fit loses the pairing of
+  // the extra ones for predicated-tiling replays, which then pair as a first draw does.
+  struct PairedSlot {
+    uint32_t address = 0;
+    bool used = false;
+    PairedPacket packet{};
+  };
+  static constexpr uint32_t kPairedSlots = 8192;  // power of 2
+  std::vector<PairedSlot> paired_packets_ = std::vector<PairedSlot>(kPairedSlots);
+  static uint32_t PairedIndex(uint32_t address) { return (address >> 2) * 0x9E3779B1u >> (32 - 13); }
+  void NotePairedPacket(const PairedPacket& packet) {
+    uint32_t i = PairedIndex(packet_address_);
+    for (uint32_t probe = 0; probe < 64; ++probe, i = (i + 1) & (kPairedSlots - 1)) {
+      PairedSlot& slot = paired_packets_[i];
+      if (!slot.used || slot.packet.frame != swaps_ || slot.address == packet_address_) {
+        slot = {packet_address_, true, packet};
+        return;
+      }
+    }
+  }
+  const PairedPacket* FindPairedPacket() const {
+    uint32_t i = PairedIndex(packet_address_);
+    for (uint32_t probe = 0; probe < 64; ++probe, i = (i + 1) & (kPairedSlots - 1)) {
+      const PairedSlot& slot = paired_packets_[i];
+      if (!slot.used || slot.packet.frame != swaps_) return nullptr;  // empty for this frame: not there
+      if (slot.address == packet_address_) return &slot.packet;
+    }
+    return nullptr;
+  }
   std::deque<DrawRecord> pending_;
   const sa2::native::ShaderEntry* draw_vs_ = nullptr;
   const sa2::native::ShaderEntry* draw_ps_ = nullptr;
