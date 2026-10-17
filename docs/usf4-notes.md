@@ -778,3 +778,10 @@ period [obj+176] (0.016667), Sleep(0) + read the clock. usf4_cpu_frame_limiter_s
 0x82756ED0) sleeps for the missing time minus usf4_frame_limiter_margin_us (1000), then the loop spins as before. Code
 check sub_82756DE8 336 bytes 0x18A88DF8143CF8A3. PC: the call site is reached with f13 = 0.016667 and f0 = 0.0006 at
 the first look (the PC fight never runs ahead, so it only sleeps in menus).
+- Console (0.7.1 normal build with usf4_job_wait_spin_us = 0 in usf4.toml, 2026-10-17, 1785 / 768): fights 59.9-60.3
+  fps; yields 0.15-0.20 million per second (0.7.0: 0.45-0.64), clock reads (UpdateGuestClock) 0.13 million (0.7.0:
+  0.5-1.0); limiter sleeps ~58 per second (one per frame), 0.22-0.55 s asleep per second. CPU total in fights 197-216 %
+  (0.7.0: 234-236 %); main thread 54 % of a core (0.7.0: 81 %), job workers 6.5 % each (9.4 %), ring 53 %, recording
+  worker 37 %. Status Monitor cores 62 / 79-89 / 56-70 % (0.7.0: 66 / 84 / 88 %), GPU 69-71 %. Single 43-52 ms frames
+  in some 5 s windows (59.1-59.5 fps there), as in 0.7.0 (44-59 ms); no pipelines created, they come with new
+  shader loads ("VS word diff" / "PS identity mismatch" lines) and round changes.
