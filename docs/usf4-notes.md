@@ -785,3 +785,13 @@ the first look (the PC fight never runs ahead, so it only sleeps in menus).
   worker 37 %. Status Monitor cores 62 / 79-89 / 56-70 % (0.7.0: 66 / 84 / 88 %), GPU 69-71 %. Single 43-52 ms frames
   in some 5 s windows (59.1-59.5 fps there), as in 0.7.0 (44-59 ms); no pipelines created, they come with new
   shader loads ("VS word diff" / "PS identity mismatch" lines) and round changes.
+
+### 0.7.2: the recording worker sleeps at once on an empty queue (2026-10-17)
+
+Console tests of v0.7.1 with `sa2_native_deferred_recording_naps` in usf4.toml (1785 / 768, fights):
+- 16: naps 34-44k per second (64: ~50k), otherwise as 0.7.1.
+- 0: naps 0.9-7k per second (what is left is the ring thread's WAIT_REG_MEM sleeps), recording worker 32.6 % of a core
+  (36.5 %), CPU total 199-203 %, fights 60.0-60.4 fps, longest frames 17.1-17.6 ms apart from one 46 ms (round change).
+  Status Monitor cores 57-62 / 56-66 / 80-87 % (0.7.1: 62 / 79-89 / 56-70 %), GPU 72 %. Ring 9.5-9.6 ms per Swap at
+  ~410 draws (23.3 us per draw; 0.7.1 9.1-9.2 ms, 21-21.5 us): the condition-variable wake at each publish.
+Switch default now 0 (usf4_switch_defaults.toml).

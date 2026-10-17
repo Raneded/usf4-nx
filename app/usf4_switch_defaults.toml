@@ -56,3 +56,9 @@ usf4_deferred_async_submit = true
 # 21.6 ms per 21.7 ms frame but on the CPU only 68 % of it: the rest it waited for room in the queue (~1/5 of a frame).
 # The log line "deferred recording drains by cause" says how often the queue is still full. 10 = the previous length.
 usf4_deferred_slots_log2 = 12
+
+# 0.7.2: the recording worker blocks on its condition variable as soon as the queue is empty (no 5 us naps first; the
+# ring thread wakes it at every publish). Console 0.7.1 (2026-10-17): 64 naps = ~50k wake-ups per second at the ring
+# thread's priority on core 0; 0 = 1-7k, worker 37 -> 33 % of a core, Status Monitor core 1 79-89 -> 56-66 %, 60 fps,
+# ring +0.4 ms per Swap (the wake at each publish). 64 = the previous behaviour.
+sa2_native_deferred_recording_naps = 0
