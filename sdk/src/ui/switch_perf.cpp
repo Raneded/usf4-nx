@@ -315,6 +315,72 @@ void PrintAddr(FILE* f, u64 addr) {
   }
 }
 
+// Who yields and naps (svcSleepThread with 0 or less, or up to 1 ms): the first return addresses along the x29 chain,
+// counted per distinct chain and listed in the 10-second report (the profiler's samples rarely land in a yield).
+struct SleepCaller {
+  std::atomic<u64> key{0};
+  std::atomic<u64> count{0};
+  u64 frames[4]{};
+  bool nap = false;
+};
+constexpr size_t kSleepCallers = 128;
+std::atomic<bool> g_sleep_callers_on{false};  // profiling builds only (with the stack sampling)
+SleepCaller g_sleep_callers[kSleepCallers];
+
+void NoteSleepCaller(bool nap) {
+  u64 frames[4]{};
+  const u64* fp = static_cast<const u64*>(__builtin_frame_address(0));
+  for (size_t j = 0; j < 4 && fp && (reinterpret_cast<u64>(fp) & 15) == 0; ++j) {
+    frames[j] = fp[1];
+    const u64* next = reinterpret_cast<const u64*>(fp[0]);
+    if (next <= fp || reinterpret_cast<u64>(next) - reinterpret_cast<u64>(fp) > (1u << 20)) break;
+    fp = next;
+  }
+  u64 key = nap ? 0x9E3779B97F4A7C15ull : 1;
+  for (u64 f : frames) key = (key ^ f) * 0x100000001B3ull;
+  if (!key) key = 1;
+  for (size_t i = 0, h = size_t(key % kSleepCallers); i < 16; ++i, h = (h + 1) % kSleepCallers) {
+    SleepCaller& c = g_sleep_callers[h];
+    u64 seen = c.key.load(std::memory_order_acquire);
+    if (seen == 0) {
+      u64 expected = 0;
+      if (c.key.compare_exchange_strong(expected, ~u64(0), std::memory_order_acq_rel)) {
+        std::memcpy(c.frames, frames, sizeof(frames));
+        c.nap = nap;
+        c.key.store(key, std::memory_order_release);
+        seen = key;
+      } else {
+        seen = expected;
+      }
+    }
+    if (seen == key) {
+      c.count.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+}
+
+void PrintSleepCallers(FILE* f, double seconds) {
+  std::vector<std::pair<u64, size_t>> top;
+  for (size_t i = 0; i < kSleepCallers; ++i) {
+    const u64 key = g_sleep_callers[i].key.load(std::memory_order_acquire);
+    if (key == 0 || key == ~u64(0)) continue;
+    const u64 n = g_sleep_callers[i].count.exchange(0, std::memory_order_relaxed);
+    if (n) top.push_back({n, i});
+  }
+  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (size_t k = 0; k < top.size() && k < 12; ++k) {
+    const SleepCaller& c = g_sleep_callers[top[k].second];
+    std::fprintf(f, "     %s per second %.0f:", c.nap ? "nap" : "yield", double(top[k].first) / seconds);
+    for (size_t j = 0; j < 4 && c.frames[j]; ++j) {
+      std::fputs(j == 0 ? " " : " <- ", f);
+      PrintAddr(f, c.frames[j]);
+    }
+    std::fputc('\n', f);
+  }
+}
+
+
 /*
  * Is the pc right after a system call? Then the thread is waiting in the kernel,
  * not using CPU.
@@ -608,6 +674,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  n[kMappingGpu], mb[kMappingGpu], ms[kMappingGpu], n[kCacheClean], mb[kCacheClean], ms[kCacheClean],
                  n[kQueueBuffer], ms[kQueueBuffer], n[kDequeueBuffer], ms[kDequeueBuffer], n[kSleep0],
                  n[kSleepYield], n[kSleepShort], ms[kSleepShort], n[kSleepLong]);
+    PrintSleepCallers(f, seconds);
   }
   // Host-runtime overhead (rex/sys_counters.h): wake-ups spent polling and lock stalls, per second.
   std::fprintf(f,
@@ -959,6 +1026,7 @@ void ProfilerMain(void*) {
   // overlay's FPS and resolution keep going.
   const bool report = rex::cvar::GetFlagByName("switch_profile_report") != "false";
   if (!report) sample_stacks = false;
+  g_sleep_callers_on.store(sample_stacks, std::memory_order_relaxed);
 
   u64 counters_last[kCounterCount]{};
   for (unsigned i = 0; i < kCounterCount; ++i) {
@@ -1162,6 +1230,7 @@ Result __wrap_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32 
 }
 
 void __wrap_svcSleepThread(s64 nano) {
+  if (nano <= 1000000 && g_sleep_callers_on.load(std::memory_order_relaxed)) NoteSleepCaller(nano > 0);
   const u64 from = armGetSystemTick();
   __real_svcSleepThread(nano);
   Note(nano == 0 ? kSleep0 : nano < 0 ? kSleepYield : nano <= 1000000 ? kSleepShort : kSleepLong, from);
