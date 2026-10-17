@@ -709,3 +709,12 @@ work per Swap at 21.2-22.0 us per draw (0.6.6: ~12.2 ms, ~24 us); ring thread 68
 on Honda's stage (~315 draws, ring 8.5 ms, main game thread 85 % of a core there, now the busiest thread). The
 deferred-recording worker (core 0) takes ~43 %. Hitches only at boot / loading (up to 600 ms) and one 174 ms frame at a
 stage change. User: "this felt good. Seems like we're gaining some headroom".
+
+### 0.6.8: profiling measurements off in the Switch build (2026-10-17)
+
+The 0.6.7 console log showed the GPU using the whole frame on the busiest stage (16.7 ms per Swap, Status Monitor 95 %),
+with 1.7 ms of "gap" between marks. The Switch defaults still had the profiling build's two measurements on since
+0.2.0: sa2_gpu_marks_categories (a timestamp at every change of pass category, ~14 categories, many per frame) and
+switch_profile_stacks (every thread interrupted every 1 ms). 0.6.8 turns both off in usf4_switch_defaults.toml. The
+10-second report (per-thread CPU, ring and GPU totals per Swap) stays; only the per-category GPU split and the stack
+samples go. Set both true again for a profiling build.

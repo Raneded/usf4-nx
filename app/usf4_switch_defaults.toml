@@ -26,9 +26,10 @@ sa2_noncpu_enhancements = true
 asset_pack_build = false
 
 # Profiling build (0.2.0): GPU time per pass category in the log (EDRAM transfers, scene, copies, ...), and CPU stack
-# samples of the game threads in logs/rex/rex_profile.log. Both cost a little; off again for a release.
-sa2_gpu_marks_categories = true
-switch_profile_stacks = true
+# samples of the game threads in logs/rex/rex_profile.log. Both cost a little; off since 0.6.8 (one GPU mark per
+# submission and the 10-second report with per-thread CPU stay). Set both true for a profiling build.
+sa2_gpu_marks_categories = false
+switch_profile_stacks = false
 
 # 0.3.0: Direct3D's Clear through the 4x alias clears straight into the depth views that own its tiles
 # (docs/usf4-notes.md, "Clears into depth owners"): -81 % of the 9-pass depth imports in a fight.
