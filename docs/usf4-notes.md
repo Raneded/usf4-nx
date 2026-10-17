@@ -743,3 +743,7 @@ fetches merged into column imports (the "tiles" in the 9-pass list are column sp
 - Console test (profiling build, 2026-10-17): edram_import9 3.4 -> 0.3 ms (the remaining copy-engine stencil import),
   GPU "gap" 2.1 -> 4.5 ms per Swap, Status Monitor GPU 74-76 % in fights, no glitches seen. User: "load seems to be
   lowered".
+
+Console result of 0.6.9 (normal build, 2026-10-17, 1785 / 768): fights 59.5-59.7 fps (longest frame 17.6 ms outside
+round changes), ~400-420 draws, ring 9.1-9.4 ms per Swap. Status Monitor in fights: GPU 70-73 % (0.6.8: 81-89 %),
+cores 64 / 85 / 83 %. CPU total 227-244 %. User: "it runs great".
