@@ -5989,6 +5989,17 @@ class DrawsVulkanImpl final : public DrawsVulkan {
 
   void InvalidateTextures() override { ++generation_textures_; }
 
+  void InvalidateTexturesAt(uint32_t base) override {
+    const auto drop = [base](CacheSampler& c) {
+      if ((c.fetch[1] & 0xFFFFF000u) == base) {  // dword_1 base_address (bits 12-31) << 12
+        c.frame = UINT64_MAX;
+        c.valid_until = 0;
+      }
+    };
+    for (CacheSampler& c : cache_samplers_) drop(c);
+    for (CacheSampler& c : cache_fetch_) drop(c);
+  }
+
   // Only the cache entries that use a view of those images. The views stay valid (they go with their
   // image); what has to be redone is which slot each fetch constant gets.
   void InvalidateImages(VkImage a, VkImage b) override {

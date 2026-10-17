@@ -376,6 +376,9 @@ class DrawsVulkan {
   virtual bool DropTexturesPerMissingOfMemory() = 0;
   // Before every render target copy: a resolved texture may change image or channels.
   virtual void InvalidateTextures() = 0;
+  // usf4-nx: only the texture cache entries whose fetch constant has this base address (the crops of a resolved
+  // texture are sampled at its own base; ResolvedWritten in sa2_native_targets.cpp).
+  virtual void InvalidateTexturesAt(uint32_t base) { (void)base; InvalidateTextures(); }
 
   // Invalidates in the texture caches only what points to these two images. Used by the image swap of
   // sa2_native_resolver_no_copy: dropping the whole cache twice per frame costs more than the copy it

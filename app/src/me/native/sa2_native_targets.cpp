@@ -261,6 +261,11 @@ REXCVAR_DEFINE_BOOL(sa2_native_conversion_frag, false, "SA2 renderer",
 // padding keeps the view's own stale stencil instead of the previous owner's (not bit-exact there; the game clears the
 // scene's stencil before using it, and no difference was seen on the PC or the console). Switch 0.6.9 test: 0.3 ms left
 // in that category, Status Monitor GPU 74-76 % in fights (0.6.8 profiling build: 81-95 %).
+REXCVAR_DEFINE_BOOL(usf4_resolved_crops_invalidate_narrow, true, "USF4",
+    "A resolve into a texture with crops invalidates only the texture cache entries at that base address (the crops "
+    "are sampled there) instead of the whole cache (~2 times per frame, ~80 texture lookups redone each). false = "
+    "whole cache, as before")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(usf4_edram4_stencil_edges_skip, true, "USF4",
                     "EDRAM mode 4: tiles only partly inside a stencil-replace clear rectangle skip their old stencil "
                     "(the padding pixels outside the rectangle keep stale bits instead of 8 stencil passes). "
@@ -9339,7 +9344,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       // including consecutive draws within one frame. Partial writes invalidate the complete ROI.
       for (const auto& crop : resolved_clips_) {
         if (crop.address == base) {
-          if (draws_) draws_->InvalidateTextures();
+          if (draws_) {
+            if (REXCVAR_GET(usf4_resolved_crops_invalidate_narrow)) draws_->InvalidateTexturesAt(base);
+            else draws_->InvalidateTextures();
+          }
           break;
         }
       }
