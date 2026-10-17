@@ -766,3 +766,15 @@ Sleep(0), look again); 10-17 % of the main thread's samples. Second source: the 
   CPU total 234-236 %. Yields 0.45-0.64 million per second (0.6.9: 0.74-0.98), main thread 80.7 % of a core (0.6.9
   profiling: 88 %), ~130 condition-variable sleeps per second (~28 ms asleep per second): most waits end inside the
   20 us spin. User: "load is definitely down".
+- Spin tests (usf4.toml, 2026-10-17): usf4_job_wait_spin_us 5 and 0 changed little (fights 59.7-60.0 fps, yields
+  0.55-0.78 million per second, condition-variable sleeps 120-180 per second; the same single 44-45 ms frames as with
+  20). User felt dropped frames with 5. Kept 20. The remaining yields are not this loop's spin:
+
+### 0.7.1 test: the game's frame limiter sleeps (2026-10-17)
+
+sub_82756DE8 (7 % of the main thread's samples in the 0.6.9 profile, via SleepEx) is the frame limiter: while the
+seconds since the last frame (QueryPerformanceCounter delta x 1.0 / frequency, constant at 0x820EBABC) are below the
+period [obj+176] (0.016667), Sleep(0) + read the clock. usf4_cpu_frame_limiter_sleep (on): its Sleep(0) (return address
+0x82756ED0) sleeps for the missing time minus usf4_frame_limiter_margin_us (1000), then the loop spins as before. Code
+check sub_82756DE8 336 bytes 0x18A88DF8143CF8A3. PC: the call site is reached with f13 = 0.016667 and f0 = 0.0006 at
+the first look (the PC fight never runs ahead, so it only sleeps in menus).
