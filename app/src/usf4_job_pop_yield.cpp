@@ -32,6 +32,10 @@ SA2_ENHANCEMENT(g_job_pop_yield, usf4_cpu_job_pop_yield, sa2::enh::kCpu, true,
                 "An empty pop from the XDK job list (sub_82966BA8) yields the core, so job workers waiting for "
                 "other workers' jobs do not starve them");
 
+namespace usf4 {
+extern thread_local bool t_job_popped;  // usf4_job_wait.cpp
+}  // namespace usf4
+
 namespace {
 
 constexpr uint32_t kPop = 0x82966BA8;
@@ -45,7 +49,10 @@ std::atomic<int> g_state{0};  // 0 unknown, 1 on, -1 off (code check failed or k
 REX_EXTERN(__imp__sub_82966BA8);
 REX_HOOK_RAW(sub_82966BA8) {
   __imp__sub_82966BA8(ctx, base);
-  if (ctx.r3.u32 != 0) return;
+  if (ctx.r3.u32 != 0) {
+    usf4::t_job_popped = true;
+    return;
+  }
   int state = g_state.load(std::memory_order_relaxed);
   if (state == 0) {
     state = (g_job_pop_yield.active &&
