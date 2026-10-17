@@ -795,3 +795,18 @@ Console tests of v0.7.1 with `sa2_native_deferred_recording_naps` in usf4.toml (
   Status Monitor cores 57-62 / 56-66 / 80-87 % (0.7.1: 62 / 79-89 / 56-70 %), GPU 72 %. Ring 9.5-9.6 ms per Swap at
   ~410 draws (23.3 us per draw; 0.7.1 9.1-9.2 ms, 21-21.5 us): the condition-variable wake at each publish.
 Switch default now 0 (usf4_switch_defaults.toml).
+
+### 0.7.2: narrow sampler-cache invalidation for resolved crops (2026-10-17)
+
+The console's per-fetch sampler cache missed 48 % of its lookups, 99 % of them "by generation". PC counters on every
+InvalidateTextures / ForgetImage site: in fights only ResolvedWritten fires (~2 per frame): a resolve into a texture
+that has crops (resolved_clips_) bumped the whole cache's generation. Crops are only sampled by fetches whose base is
+the crop's address (the crop contract needs base_page << 12 == address), so usf4_resolved_crops_invalidate_narrow (on)
+drops only the register / per-fetch entries whose fetch dword_1 base (bits 12-31) is that address
+(InvalidateTexturesAt). PC: misses 50 -> 22 %; lockstep frames vs the old path median 0.09 mean abs diff (noise level).
+
+Console (0.7.2 test, 2026-10-17, 1785 / 768, Elena's jungle stage, ~300-340 draws): misses 14 % (none by generation),
+textures stage 2.4 -> 1.3-1.5 us per draw; fights 60.0-60.3 fps, CPU total 178-187 %, main thread 43.5 %, ring 41 %,
+recording worker 29 %, Status Monitor cores 53 / 56 / 73 %, GPU 79 %. User: no glitches. (Fewer draws than the earlier
+stages, so the totals are not directly comparable.) Remaining draw stages per draw: uploads 2.8-3.2 us, targets /
+indices / vertices 2.4-2.9, record 1.9, framing 1.5.
