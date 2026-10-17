@@ -254,14 +254,17 @@ REXCVAR_DEFINE_BOOL(sa2_native_conversion_frag, false, "SA2 renderer",
                     "tile rectangle instead of a compute dispatch (no storage-image traffic, no 3D<->compute engine "
                     "switch). Same words bit for bit. false = compute shaders")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-// usf4-nx 0.6.9 test: how much GPU time the stencil of edge tiles costs. A stencil-replace clear (one rectangle, stencil
-// ALWAYS/REPLACE, write mask 0xFF) over a 512x512, 1024x1024 or 320x180 target leaves the right or bottom tile of each row
-// partly outside the rectangle (the pitch is padded to whole 80x16 tiles: 560, 1040, ...). Those tiles still get their
-// old stencil (8 bit passes) for the padding pixels the target never draws. On: the edge tiles are treated as replaced
-// too, so the padding keeps the view's own stale stencil (not exact: only for measuring).
-REXCVAR_DEFINE_BOOL(usf4_edram4_stencil_edges_skip, false, "USF4",
-                    "Test (not exact): tiles only partly inside a stencil-replace clear rectangle skip their old "
-                    "stencil (the padding pixels keep stale bits), to measure the cost of those stencil passes")
+// usf4-nx 0.6.9: a stencil-replace clear (one rectangle, stencil ALWAYS/REPLACE, write mask 0xFF) over a 512x512, 1024x1024
+// or 320x180 target leaves the right or bottom tile of each row partly outside the rectangle (the pitch is padded to whole
+// 80x16 tiles: 560, 1040, ...). Those tiles used to get their old stencil (8 bit passes, 3.4 ms of GPU per frame in fights
+// on the Switch at 768 MHz) for the padding pixels the target never draws. Now the edge tiles count as replaced too: the
+// padding keeps the view's own stale stencil instead of the previous owner's (not bit-exact there; the game clears the
+// scene's stencil before using it, and no difference was seen on the PC or the console). Switch 0.6.9 test: 0.3 ms left
+// in that category, Status Monitor GPU 74-76 % in fights (0.6.8 profiling build: 81-95 %).
+REXCVAR_DEFINE_BOOL(usf4_edram4_stencil_edges_skip, true, "USF4",
+                    "EDRAM mode 4: tiles only partly inside a stencil-replace clear rectangle skip their old stencil "
+                    "(the padding pixels outside the rectangle keep stale bits instead of 8 stencil passes). "
+                    "false = exact, as before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(sa2_native_edram4_stencil_copy_min_tiles, 32, "SA2 renderer",
                      "EDRAM mode 4: smallest import (tiles) whose stencil goes through the copy engine; smaller "

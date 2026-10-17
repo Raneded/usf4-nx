@@ -725,3 +725,21 @@ Honda's). Ring 10.1-10.3 ms per Swap at ~440 draws (22.9 us per draw, as in 0.6.
 recording worker 39 % (0.6.7: 43 %), main game thread 66 %. CPU total in fights 217-242 % (0.6.7: 240-255 %). With the
 category marks off, "GPU per Swap" only spans first mark to first mark (= the frame interval, 16.8 ms), so it no longer
 shows GPU load; use Status Monitor. User: "cpu load seemed lower".
+
+### 0.6.9: edge tiles of stencil-replace clears skip their old stencil (2026-10-17)
+
+0.6.8 profiling build on the console: edram_import9 (depth imports with the 8 stencil-bit passes) 3.4-3.5 ms of GPU per
+Swap in fights, scene 3.0-3.6, edram_import 2.2, copies 1.7. PC trace (Switch settings): every 9-pass import came from
+one draw kind, VS n777 / PS n641, a one-rectangle clear with RB_DEPTHCONTROL 00008777 (Z ALWAYS + write, stencil ALWAYS,
+zpass REPLACE, ref 0, write mask 0xFF) over 1024x1024 (D340, pitch 1040), 512x512 (D0E0, pitch 560) and 320x180 (D060 /
+D528, pitch 320) targets. The proven stencil-replace rectangle covers each target's used area, but the right / bottom tile
+of every row is only partly inside (padding to whole 80x16 tiles), so those tiles got their old stencil first: deferred
+fetches merged into column imports (the "tiles" in the 9-pass list are column spans; ~140 real tiles per frame).
+
+- usf4_edram4_stencil_edges_skip (on): tiles only partly inside the replace rectangle count as replaced (lazy-stencil
+  record cleared at the draw; import with only the depth step). The padding pixels keep the view's stale stencil.
+- PC: 9-pass imports none, 0 draw failures; lockstep frames vs 0.6.7 differ only by the usual animation drift
+  (median 1.33 mean abs vs 1.04 between two earlier normal builds; background 0.07 % of pixels).
+- Console test (profiling build, 2026-10-17): edram_import9 3.4 -> 0.3 ms (the remaining copy-engine stencil import),
+  GPU "gap" 2.1 -> 4.5 ms per Swap, Status Monitor GPU 74-76 % in fights, no glitches seen. User: "load seems to be
+  lowered".
