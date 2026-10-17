@@ -254,6 +254,15 @@ REXCVAR_DEFINE_BOOL(sa2_native_conversion_frag, false, "SA2 renderer",
                     "tile rectangle instead of a compute dispatch (no storage-image traffic, no 3D<->compute engine "
                     "switch). Same words bit for bit. false = compute shaders")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// usf4-nx 0.6.9 test: how much GPU time the stencil of edge tiles costs. A stencil-replace clear (one rectangle, stencil
+// ALWAYS/REPLACE, write mask 0xFF) over a 512x512, 1024x1024 or 320x180 target leaves the right or bottom tile of each row
+// partly outside the rectangle (the pitch is padded to whole 80x16 tiles: 560, 1040, ...). Those tiles still get their
+// old stencil (8 bit passes) for the padding pixels the target never draws. On: the edge tiles are treated as replaced
+// too, so the padding keeps the view's own stale stencil (not exact: only for measuring).
+REXCVAR_DEFINE_BOOL(usf4_edram4_stencil_edges_skip, false, "USF4",
+                    "Test (not exact): tiles only partly inside a stencil-replace clear rectangle skip their old "
+                    "stencil (the padding pixels keep stale bits), to measure the cost of those stencil passes")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(sa2_native_edram4_stencil_copy_min_tiles, 32, "SA2 renderer",
                      "EDRAM mode 4: smallest import (tiles) whose stencil goes through the copy engine; smaller "
                      "ones use masked stencil draws in the import pass (no engine switches). 0 = always copy")
@@ -5999,9 +6008,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
           const auto& sr = *p.edram_stencil_replace_rect;
           const VkRect2D replacement = RasterArea(*image, VkRect2D{{sr[0], sr[1]},
               {uint32_t(sr[2] - sr[0]), uint32_t(sr[3] - sr[1])}});
+          const bool edges_skip = REXCVAR_GET(usf4_edram4_stencil_edges_skip);
           for (uint32_t t = 0; t < edram4_draw_plan_.length_tiles[0] && t < 2048; ++t) {
             bool whole = false;
-            if (TileUsedEDRAM4(*image, t, replacement, &whole) && whole) StencilRealEDRAM4(*image, t, 1);
+            if (TileUsedEDRAM4(*image, t, replacement, &whole) && (whole || edges_skip)) StencilRealEDRAM4(*image, t, 1);
           }
         }
         if (!FetchStencilDeferredEDRAM4(*image, 0, edram4_draw_plan_.length_tiles[0])) return false;
@@ -7133,13 +7143,19 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
                                    layout_pipeline_import_depth_edram_, 0, 1, &set, 0, nullptr);
     uint32_t steps = 9;  // depth + 8 stencil bits
     bool keep_stencil = false;
-    const bool stencil_replaced = edram4_stencil_replacement_ &&
+    const auto& sr = edram4_stencil_replacement_;
+    const bool stencil_replaced = (sr && REXCVAR_GET(usf4_edram4_stencil_edges_skip) &&
+        int64_t(scissor.offset.x) < int64_t(sr->offset.x) + sr->extent.width &&
+        int64_t(sr->offset.x) < int64_t(scissor.offset.x) + scissor.extent.width &&
+        int64_t(scissor.offset.y) < int64_t(sr->offset.y) + sr->extent.height &&
+        int64_t(sr->offset.y) < int64_t(scissor.offset.y) + scissor.extent.height) ||
+        (edram4_stencil_replacement_ &&
         scissor.offset.x >= edram4_stencil_replacement_->offset.x &&
         scissor.offset.y >= edram4_stencil_replacement_->offset.y &&
         int64_t(scissor.offset.x) + scissor.extent.width <=
             int64_t(edram4_stencil_replacement_->offset.x) + edram4_stencil_replacement_->extent.width &&
         int64_t(scissor.offset.y) + scissor.extent.height <=
-            int64_t(edram4_stencil_replacement_->offset.y) + edram4_stencil_replacement_->extent.height;
+            int64_t(edram4_stencil_replacement_->offset.y) + edram4_stencil_replacement_->extent.height);
     if (stencil_replaced) {
       steps = 1;  // the draw about to run replaces all of this stencil: only depth must arrive
       real_runs();
