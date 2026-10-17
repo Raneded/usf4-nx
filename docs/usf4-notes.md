@@ -747,3 +747,22 @@ fetches merged into column imports (the "tiles" in the 9-pass list are column sp
 Console result of 0.6.9 (normal build, 2026-10-17, 1785 / 768): fights 59.5-59.7 fps (longest frame 17.6 ms outside
 round changes), ~400-420 draws, ring 9.1-9.4 ms per Swap. Status Monitor in fights: GPU 70-73 % (0.6.8: 81-89 %),
 cores 64 / 85 / 83 %. CPU total 227-244 %. User: "it runs great".
+
+### 0.7.0 test: the main thread sleeps while its jobs run (2026-10-17)
+
+0.6.9 profiling build with per-caller yield counts (`switch_perf.cpp`, profiling builds only): in fights 0.65-0.92 million
+yields per second came from one chain, KeDelayExecutionThread <- SleepEx (sub_8220FB70) <- Sleep (sub_8220FC00) <-
+sub_82966C90, the main thread's "wait for my job batch" loop (collect finished jobs, run one if the list has one,
+Sleep(0), look again); 10-17 % of the main thread's samples. Second source: the deferred-recording worker's 5 us naps
+(30-48k per second, BeginCommands worker lambda, `sa2_native_deferred_recording_naps` 64), left as they are.
+
+- usf4_cpu_job_wait_block (on, `src/usf4_job_wait.cpp`): the Sleep(0) at return address 0x82966E40 returns at once when
+  a job finished since the last look, else yields for `usf4_job_wait_spin_us` (20) and then sleeps on a condition
+  variable bumped by every sub_82967288 that popped a job (2 ms safety timeout). Hooks on sub_8220FC00 and sub_82967288
+  (their direct `__imp__` calls in the generated code turned back into hookable calls; the addresses are in the sources,
+  so tools/direct_calls.py keeps them). Code checks: sub_82966C90 488 bytes, sub_82967288 120 bytes.
+- PC fight (Switch settings): code checks pass, ring 45 ms per Swap as before, ~46 sleeps per second.
+- Console (normal build, 1785 / 768): fights 59.4-60.1 fps, Status Monitor GPU 74-76 %, cores 66-67 / 84-85 / 87-91 %,
+  CPU total 234-236 %. Yields 0.45-0.64 million per second (0.6.9: 0.74-0.98), main thread 80.7 % of a core (0.6.9
+  profiling: 88 %), ~130 condition-variable sleeps per second (~28 ms asleep per second): most waits end inside the
+  20 us spin. User: "load is definitely down".
