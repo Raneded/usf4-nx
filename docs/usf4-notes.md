@@ -718,3 +718,10 @@ with 1.7 ms of "gap" between marks. The Switch defaults still had the profiling 
 switch_profile_stacks (every thread interrupted every 1 ms). 0.6.8 turns both off in usf4_switch_defaults.toml. The
 10-second report (per-thread CPU, ring and GPU totals per Swap) stays; only the per-category GPU split and the stack
 samples go. Set both true again for a profiling build.
+
+Console result of 0.6.8 (2026-10-17, 1785 / 768): Dudley's stage (~440 draws) 59.5-59.9 fps, Status Monitor GPU 89 %,
+cores 71 / 92 / 81 %; Guile's stage GPU 81 %, cores 60 / 80 / 77 % (0.6.7: GPU 94-95 % on the ~500-draw street stage and
+Honda's). Ring 10.1-10.3 ms per Swap at ~440 draws (22.9 us per draw, as in 0.6.7), ring thread 59.5 % of a core,
+recording worker 39 % (0.6.7: 43 %), main game thread 66 %. CPU total in fights 217-242 % (0.6.7: 240-255 %). With the
+category marks off, "GPU per Swap" only spans first mark to first mark (= the frame interval, 16.8 ms), so it no longer
+shows GPU load; use Status Monitor. User: "cpu load seemed lower".
