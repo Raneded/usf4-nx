@@ -40,6 +40,7 @@
 #endif
 
 #include "cpu/sa2_enhancements.h"
+#include "usf4_frame_probe.h"
 
 SA2_ENHANCEMENT(g_job_wait_block, usf4_cpu_job_wait_block, sa2::enh::kCpu, true,
                 "The main thread's wait for its jobs (Sleep(0) loop in sub_82966C90) sleeps until a job finishes "
@@ -191,11 +192,13 @@ REX_HOOK_RAW(sub_82967288) {
 REX_EXTERN(__imp__sub_8220FC00);
 REX_HOOK_RAW(sub_8220FC00) {
   if (ctx.lr == kSleepReturn && ctx.r3.u32 == 0 && On(base)) {
+    const usf4::probe::Scope probe(usf4::probe::kJobs);
     WaitForJob();
     ctx.r3.u64 = 0;  // SleepEx's result for a sleep that was not alerted
     return;
   }
   if (ctx.lr == kLimiterReturn && ctx.r3.u32 == 0 && LimiterOn(base)) {
+    const usf4::probe::Scope probe(usf4::probe::kLimiter);
     LimiterSleep(ctx.f0.f64, ctx.f13.f64);
     ctx.r3.u64 = 0;
     return;

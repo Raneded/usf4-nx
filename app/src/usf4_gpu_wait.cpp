@@ -27,6 +27,7 @@
 #include <cstring>
 
 #include <rex/cvar.h>
+#include "usf4_frame_probe.h"
 #include <rex/hook.h>
 #include <rex/platform.h>
 #include <rex/ppc.h>
@@ -91,6 +92,7 @@ REX_HOOK_RAW(sub_821F54E0) {
     __imp__sub_821F54E0(ctx, base);
     return;
   }
+  const usf4::probe::Scope probe(usf4::probe::kGpu);
   const uint32_t record = ctx.r3.u32;
   const uint32_t seen = Ld32(base, record + 8);
   if (record == t_record && seen == t_seen) {

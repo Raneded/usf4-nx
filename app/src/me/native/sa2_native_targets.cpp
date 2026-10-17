@@ -2590,9 +2590,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 9> codes_conversion{{
       const auto now = std::chrono::steady_clock::now();
       if (last_swap_ != std::chrono::steady_clock::time_point{}) {
         const double ms = std::chrono::duration<double, std::milli>(now - last_swap_).count();
-        // Frames over 45 ms go to stack sampling. The window starts one normal frame (33 ms) earlier, because
+        // Frames over 30 ms go to stack sampling (usf4 0.7.3: was 45; the console's fight hitches are 43-52 ms). The window starts one normal frame (33 ms) earlier, because
         // the game thread prepares the frame ahead of the ring. Ticks at 19.2 MHz.
-        if (ms > 45.0) {
+        if (ms > 30.0) {
           uint64_t end = 0;
 #if defined(__aarch64__)
           asm volatile("mrs %0, cntpct_el0" : "=r"(end));  // libnx's armGetSystemTick

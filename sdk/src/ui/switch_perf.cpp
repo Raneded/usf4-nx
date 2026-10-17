@@ -145,7 +145,7 @@ struct Sample {
 
 /*
  * Long frame windows. The renderer calls RexSwitchPerfHitch with the interval of every frame over
- * 45 ms; the report separates the samples taken inside those intervals and says what each thread was
+ * 30 ms; the report separates the samples taken inside those intervals and says what each thread was
  * doing right then (section "during the hitches"). Only works with stacks_profile.flag.
  */
 constexpr size_t kMaxHitches = 256;
@@ -727,7 +727,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
         auto it = std::upper_bound(v.begin(), v.end(), t, [](u64 x, const WindowHitch& w) { return x < w.start; });
         return it != v.begin() && t <= (it - 1)->end;
       };
-      std::fprintf(f, "\n== during the hitches: %u frames over 45 ms (%.0f ms in total) ==\n", nt, ms_total);
+      std::fprintf(f, "\n== during the hitches: %u frames over 30 ms (%.0f ms in total) ==\n", nt, ms_total);
       for (size_t i : order) {
         std::vector<u64> pcs;
         std::vector<const Sample*> all;
