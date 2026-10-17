@@ -3584,11 +3584,15 @@ class DrawsVulkanImpl final : public DrawsVulkan {
 
     Stage(3, mark);
     // --- Uploads: textures, vertices, indices and constants ------------------------------
+    // usf4 0.7.3: C6 substages 19-23 split this stage (timed draws only).
+    std::chrono::steady_clock::time_point t_uploads =
+        time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     for (Texture* texture : textures_to_upload_) {
       if (!UploadTexture(*texture)) {
         return false;
       }
     }
+    CutSubstage(19, t_uploads);  // texture uploads
     std::array<VkDeviceSize, 16> offsets_vertices{};
     uint32_t cached_bindings = 0;  // usf4_vertex_cache: bit b = binding b is in vc_buffer_, not the upload buffer
     // If the guest has waited for the GPU since the last draw, it may legally have rewritten an already
@@ -3712,6 +3716,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
                                    std::chrono::steady_clock::now() - before_vertices)
                                    .count());
     }
+    CutSubstage(20, t_uploads);  // vertices
     VkDeviceSize offset_indices = 0;
     if (with_indices && indices_cache_hit && indices_cache_frame_hit == frame_) {
       offset_indices = indices_cache_offset;  // already uploaded by an earlier draw of this upload buffer
@@ -3750,6 +3755,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       const uint32_t format = (r[info] >> 16) & 15;
       if (format == 3 || format == 7 || format == 12) me_constant_audit_hdr_ = true;
     }
+    CutSubstage(21, t_uploads);  // indices
     const uint32_t bytes_vs = std::min<uint32_t>(p.vs->constants_bytes, kRegistersConstants * 4);
     // sa2-nx (sa2_native_constants_dedupe): a new constant generation whose bytes (the part this shader reads) equal
     // the block uploaded last in this upload epoch keeps that block: no new reservation, no new set-4 dynamic offset
@@ -3783,6 +3789,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       AuditCacheConstants(true, p.vs->number, p.generation_constants_vs,
                              r + kRegConstantsVs, constants_vs_offset_, bytes_vs);
     }
+    CutSubstage(22, t_uploads);  // VS constants
     const uint32_t bytes_ps =
         ps ? std::min<uint32_t>(ps->constants_bytes, kRegistersConstants * 4) : 0;
     uint8_t constants_mode_ps = 0;
@@ -3831,6 +3838,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       AuditCacheConstants(false, ps->number, p.generation_constants_ps,
                              r + kRegConstantsPs, constants_ps_offset_, bytes_ps);
     }
+    CutSubstage(23, t_uploads);  // PS constants
 
     Stage(4, mark);
     // --- Viewport, scissor and shared constants ---------------------------------------
@@ -4776,16 +4784,19 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       sub_samples_ = 0;
       return;
     }
-    static constexpr const char* kNames[19] = {
+    static constexpr const char* kNames[24] = {
         "BindPipeline", "sets 0-3", "set 4 (UBO)", "Viewport", "Scissor", "BlendConstants", "DepthBias",
         "Stencil (6)", "BindVertexBuffers", "BindIndexBuffer", "Draw", "PipelineFor", "shared",
         "(unused)", "samplers (textures stage)",
         // The four segments of the "indices" stage (CutSubstage)
         "indices stage: targets and discards", "indices stage: depth bias",
-        "indices stage: indices", "indices stage: vertices and diagnostics"};
+        "indices stage: indices", "indices stage: vertices and diagnostics",
+        // usf4 0.7.3: the five segments of the "uploads" stage
+        "uploads: textures", "uploads: vertices", "uploads: indices", "uploads: VS constants",
+        "uploads: PS constants"};
     std::string line;
     double total = 0.0;
-    for (size_t k = 0; k < 19; ++k) {
+    for (size_t k = 0; k < 24; ++k) {
       if (!sub_n_[k]) {
         continue;
       }
@@ -13540,8 +13551,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
            report_dedupe_fingerprinted_ = 0;
   std::chrono::steady_clock::time_point base_zero_report_{};
   static constexpr uint64_t kBaseZeroToCheck = 200000;
-  std::array<uint64_t, 19> sub_ns_{};  // C6 substages, measurement only
-  std::array<uint64_t, 19> sub_n_{};
+  std::array<uint64_t, 24> sub_ns_{};  // C6 substages, measurement only
+  std::array<uint64_t, 24> sub_n_{};
   uint64_t sub_samples_ = 0;
   std::chrono::steady_clock::time_point sub_next_{};
   uint32_t stats_pass_ = UINT32_MAX;
