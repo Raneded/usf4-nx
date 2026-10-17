@@ -15,6 +15,14 @@
 //   (usf4_job_wait_spin_us) and then sleeps on a condition variable until the next job finishes (2 ms at most, a
 //   safety net: the loop just looks again). The game takes the same decisions; only the wait between two looks is a
 //   sleep. Every other Sleep call is untouched.
+//
+// THE FRAME LIMITER (CPU enhancement usf4_cpu_frame_limiter_sleep)
+//   sub_82756DE8 paces the frames: while the time since the last frame (f0, seconds: QueryPerformanceCounter ticks
+//   times 1.0 / frequency) is below the frame period ([obj+176]), it calls Sleep(0) and reads the clock again. On
+//   the console that was the rest of the yields (0.45-0.64 million per second left with usf4_cpu_job_wait_block,
+//   whatever its spin) and most of the ~0.7 million clock reads per second. Its Sleep(0) (return address 0x82756ED0)
+//   now sleeps for the time still missing minus usf4_frame_limiter_margin_us, then the loop spins as before for the
+//   last part, so the frame starts at the same moment.
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -42,6 +50,15 @@ REXCVAR_DEFINE_INT32(usf4_job_wait_spin_us, 20, "USF4",
                      "condition variable")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+SA2_ENHANCEMENT(g_frame_limiter_sleep, usf4_cpu_frame_limiter_sleep, sa2::enh::kCpu, true,
+                "The game's frame limiter (Sleep(0) loop in sub_82756DE8) sleeps for the time still missing to the "
+                "next frame, minus a margin, instead of spinning on yields");
+
+REXCVAR_DEFINE_INT32(usf4_frame_limiter_margin_us, 1000, "USF4",
+                     "usf4_cpu_frame_limiter_sleep: the limiter sleeps until this many microseconds before the frame "
+                     "is due and spins (as the game does) for the rest")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 namespace usf4 {
 // Set by the job-list pop hook (usf4_job_pop_yield.cpp) when the pop returned a job.
 thread_local bool t_job_popped = false;
@@ -56,6 +73,11 @@ constexpr uint32_t kRun = 0x82967288;
 constexpr uint32_t kRunBytes = 120;
 constexpr uint64_t kRunHash = 0xEDE7609C7E388BEFull;
 constexpr uint32_t kSleepReturn = 0x82966E40;  // return address of the Sleep(0) call in sub_82966C90
+constexpr uint32_t kLimiter = 0x82756DE8;
+constexpr uint32_t kLimiterBytes = 336;
+constexpr uint64_t kLimiterHash = 0x18A88DF8143CF8A3ull;
+constexpr uint32_t kLimiterReturn = 0x82756ED0;  // return address of the Sleep(0) call in sub_82756DE8
+std::atomic<int> g_limiter_state{0};  // as g_state
 
 std::atomic<int> g_state{0};  // 0 unknown, 1 on, -1 off (code check failed or key off); set by the first call
 std::atomic<uint64_t> g_done{0};
@@ -116,7 +138,38 @@ void WaitForJob() {
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()));
 }
 
+bool LimiterOn(uint8_t* base) {
+  int state = g_limiter_state.load(std::memory_order_relaxed);
+  if (state == 0) {
+    state = (g_frame_limiter_sleep.active &&
+             sa2::enh::GuestCodeMatches(base, kLimiter, kLimiterBytes, kLimiterHash, "usf4_cpu_frame_limiter_sleep"))
+                ? 1
+                : -1;
+    g_limiter_state.store(state, std::memory_order_relaxed);
+  }
+  return state > 0;
+}
+
+// f0 = seconds since the last frame, f13 = the frame period (both just compared by the loop: f0 < f13).
+void LimiterSleep(double elapsed, double period) {
+  static const int64_t margin_ns = int64_t(REXCVAR_GET(usf4_frame_limiter_margin_us)) * 1000;
+  const double missing = period - elapsed;
+  int64_t ns = (missing > 0.0 && missing < 0.1) ? int64_t(missing * 1e9) - margin_ns : 0;
+  if (ns <= 0) {
+    Yield();
+    return;
+  }
+  g_frame_limiter_sleep.Use();
+  g_frame_limiter_sleep.Add(uint64_t(ns / 1000));
+#if REX_PLATFORM_SWITCH
+  svcSleepThread(ns);
+#else
+  std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+#endif
+}
+
 const bool g_unit = [] {
+  g_frame_limiter_sleep.amount_unit = "us asleep";
   g_job_wait_block.amount_unit = "us waiting";
   return true;
 }();
@@ -140,6 +193,11 @@ REX_HOOK_RAW(sub_8220FC00) {
   if (ctx.lr == kSleepReturn && ctx.r3.u32 == 0 && On(base)) {
     WaitForJob();
     ctx.r3.u64 = 0;  // SleepEx's result for a sleep that was not alerted
+    return;
+  }
+  if (ctx.lr == kLimiterReturn && ctx.r3.u32 == 0 && LimiterOn(base)) {
+    LimiterSleep(ctx.f0.f64, ctx.f13.f64);
+    ctx.r3.u64 = 0;
     return;
   }
   __imp__sub_8220FC00(ctx, base);
