@@ -702,3 +702,10 @@ unordered_map that got a node for every new command-buffer address and was never
 - PC checks: tiled fight (pairing path) 48,480 replays reusing a pairing, 0.327 dropped by predicate per replay as in
   earlier tiled runs; Switch-settings fight, 0 draw failures; lockstep frames match 0.6.6 apart from a hit spark.
 - Not changed: NVK's vk_meta object frees at command-buffer reset (from vkCmdCopyImage through vk_meta).
+
+Console result of 0.6.7 (2026-10-17, 1785 / 768): ~500-draw scenes (Yang / Ryu street stage) 10.9-11.2 ms of ring
+work per Swap at 21.2-22.0 us per draw (0.6.6: ~12.2 ms, ~24 us); ring thread 68 % of a core in the profile (0.6.4:
+71 %). Fights 59.4-59.9 fps; Status Monitor cores 76 / 77 / 94 % and GPU 95 % on that stage, 63 / 87 / 83 % and GPU 94 %
+on Honda's stage (~315 draws, ring 8.5 ms, main game thread 85 % of a core there, now the busiest thread). The
+deferred-recording worker (core 0) takes ~43 %. Hitches only at boot / loading (up to 600 ms) and one 174 ms frame at a
+stage change. User: "this felt good. Seems like we're gaining some headroom".
