@@ -833,3 +833,8 @@ relative reads of an array to register 255. usf4_cpu_constants_exact_extent (on)
 instruction with dword 1 bit 30/31, checked on every ALU instruction) the extent is the end of the last declared
 Float4 constant. PC: 242 shaders narrowed; lockstep frames vs off median 0.23 mean abs diff (the same path in two
 builds: 0.43).
+- Console 0.7.3 test2 (2026-10-19, 1785 / 768, ~330-440 draws): uploads 2.9 -> 2.5-2.6 us per draw, VS constants
+  1.0 -> 0.56-0.65; ring 9.2-9.4 ms per Swap at 410-440 draws (21.4-22.1 us per draw); fights 59.9-60.2 fps, CPU total
+  202-209 %. User: "felt good", one dip at the end of the fight with Sakura: at the match end the game saves (opens
+  savedata:\30x, LIST, save.dat, save-swan.dat, replays-swan.dat, 18-31 ms each on the SD, ~100 ms in all, main-thread
+  frame 42.9 ms) and ~12 s later loads the next scene (174 ms frame, "the rest", announcer RYU_NML_J.cpk open 16 ms).
