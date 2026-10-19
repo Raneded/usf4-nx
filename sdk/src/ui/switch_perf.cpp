@@ -1050,19 +1050,13 @@ void ProfilerMain(void*) {
 
   size_t rr = 0;
   size_t mode_index = 0;
-  while (true) {
-    __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
-
-    for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
-      const size_t idx = rr;
-      rr = (rr + 1) % kMaxThreads;
-      Slot& s = g_slots[idx];
-      const u32 h = s.handle.load();
-      if (!h || !s.busy) {
-        continue;
-      }
+  // usf4-nx (0.7.4): the game's main thread ("Main XThread") is also sampled at every tick, so a single long frame
+  // (~45 ms) gets ~45 of its samples instead of ~1 from the round robin over ~40 threads.
+  size_t focus = kMaxThreads;
+  // Pauses one thread, takes its pc / lr / frame chain, resumes it. False when it could not be paused.
+  const auto sample_slot = [](size_t idx, u32 h) -> bool {
       if (R_FAILED(svcSetThreadActivity(h, ThreadActivity_Paused))) {
-        break;
+        return false;
       }
       ThreadContext ctx;
       const Result rc = svcGetThreadContext3(&ctx, h);
@@ -1091,7 +1085,36 @@ void ProfilerMain(void*) {
         }
       }
       svcSetThreadActivity(h, ThreadActivity_Runnable);
+      return true;
+  };
+  while (true) {
+    __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
+
+    size_t sampled = kMaxThreads;
+    for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
+      const size_t idx = rr;
+      rr = (rr + 1) % kMaxThreads;
+      Slot& s = g_slots[idx];
+      const u32 h = s.handle.load();
+      if (!h || !s.busy) {
+        continue;
+      }
+      if (sample_slot(idx, h)) sampled = idx;
       break;
+    }
+    if (sample_stacks) {
+      if (focus == kMaxThreads || !g_slots[focus].handle.load()) {
+        focus = kMaxThreads;
+        for (size_t i = 0; i < kMaxThreads; ++i) {
+          if (g_slots[i].handle.load() && std::strncmp(g_slots[i].name, "Main XThread", 12) == 0) {
+            focus = i;
+            break;
+          }
+        }
+      }
+      if (focus != kMaxThreads && focus != sampled) {
+        if (const u32 h = g_slots[focus].handle.load()) sample_slot(focus, h);
+      }
     }
 
     const u64 now = armGetSystemTick();

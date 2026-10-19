@@ -251,7 +251,11 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
      * the game itself deletes and recreates files and the in-memory entry goes stale; that case is
      * unchanged.
      */
-    if (parent_entry && !parent_entry->is_read_only()) {
+    // usf4-nx: not for FILE_OVERWRITE_IF on a file: its truncation (HostPathEntry::Truncate, fopen "wb") recreates a
+    // file that vanished, so the stat (2-8 ms on the Switch SD per save file) answers nothing.
+    const bool recreated_anyway = creation_disposition == FileDisposition::kOverwriteIf &&
+                                  !(entry->attributes() & kFileAttributeDirectory);
+    if (parent_entry && !parent_entry->is_read_only() && !recreated_anyway) {
       const auto* host_path_entry = dynamic_cast<const HostPathEntry*>(parent_entry);
       if (host_path_entry) {
         const auto file_path = host_path_entry->host_path() / rex::to_path(entry->name());

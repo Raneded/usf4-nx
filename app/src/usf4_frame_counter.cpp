@@ -21,6 +21,8 @@ REXCVAR_DEFINE_INT32(usf4_hitch_log_ms, 25, "USF4",
 
 std::atomic<uint64_t> g_usf4_game_frames{0};
 
+extern "C" void RexSwitchPerfHitch(uint64_t start, uint64_t end);  // sdk switch_perf.cpp (PC: me_pc_stubs.cpp)
+
 namespace {
 
 void Report() {
@@ -35,6 +37,16 @@ void Report() {
   if (dt > worst_us) worst_us = dt;
   static const uint64_t hitch_us = uint64_t(REXCVAR_GET(usf4_hitch_log_ms)) * 1000;
   uint64_t* w = usf4::probe::t_us;
+  // usf4-nx (0.7.4): game frames over 30 ms are stack-sampling windows too (profiling builds; the renderer only
+  // registers its own long Swap intervals, which a game-side hitch does not always make).
+  if (dt > 30000) {
+#if defined(__aarch64__)
+    uint64_t end = 0;
+    asm volatile("mrs %0, cntpct_el0" : "=r"(end));  // libnx's armGetSystemTick, 19.2 MHz
+    const uint64_t length = dt * 192 / 10;
+    RexSwitchPerfHitch(end > length ? end - length : 0, end);
+#endif
+  }
   if (hitch_us && dt >= hitch_us) {
     const uint64_t waits = w[usf4::probe::kGpu] + w[usf4::probe::kJobs] + w[usf4::probe::kLimiter];
     REXLOG_INFO("[hitch] frame {} took {:.1f} ms: waiting for the GPU ring {:.1f}, for jobs {:.1f}, frame limiter "
