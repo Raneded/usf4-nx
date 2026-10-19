@@ -1,13 +1,14 @@
 # Third-party notices
 
 This port is built on the work of other projects. Their licenses apply to their code and to the parts of this
-repository derived from it. New code written for this port is copyright (c) 2026 ChanseyIsTheBest and is under the
+repository derived from it. New code written for this port is copyright (c) 2026 Thorhax and is under the
 license of the folder it is in (see below).
 
 ## Projects this port is derived from
 
 | Project | Used for | License |
 |---|---|---|
+| [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) by ChanseyIsTheBest | The port this one was made from, by its method (`docs/porting-a-360-game-prompt.md` there): `app/`, `tools/`, `shaders/` and `sdk/` were copied from it and adapted to USF4 (the `sa2_*` names it kept are from there); its installer page, [sa2-nx-installer](https://github.com/ChanseyIsTheBest/sa2-nx-installer), is the base of usf4-nx-installer | GPL-3.0 |
 | [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx) by NebadasSwifty | The tree this port started from: the native renderer (`app/src/me`), the structure of `app/`, the shader library tools (`shaders/tools`), the CPU enhancement framework and many scripts in `tools/` | GPL-3.0 |
 | [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) by StevensND | The Horizon (Switch) layer of the SDK, the NVK driver build the NRO links, the profiling and PGO method | GPL-3.0; BSD-3-Clause for the SDK parts |
 | [NFSMW Recompiled](https://github.com/madelrandel-blip/NFSMW-Recompiled) by madelrandel-blip | The recompilation project the ports above started from: the structure of `app/` (application hooks, configuration, code generator setup) and the build and analysis scripts in `tools/` | GPL-3.0 |
@@ -80,7 +81,8 @@ Everything needed to rebuild and relink the NRO with a modified version of eithe
 
 ## The installer page
 
-The installer page is its own repository, [sa2-nx-installer](https://github.com/ChanseyIsTheBest/sa2-nx-installer).
+The installer page is its own repository, [usf4-nx-installer](https://github.com/Thorhax/usf4-nx-installer), made from
+[sa2-nx-installer](https://github.com/ChanseyIsTheBest/sa2-nx-installer).
 Its WebAssembly shader translator, packer and LZX decoder are built from `shaders/` and `sdk/thirdparty/libmspack` of
 this repository (`shaders/wasm/build_wasm_tools.sh`, with [Emscripten](https://emscripten.org): MIT and the University
 of Illinois/NCSA license). Its DXC is nfsmw-nx-installer's WebAssembly build of the unmodified
