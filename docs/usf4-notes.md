@@ -838,3 +838,17 @@ builds: 0.43).
   202-209 %. User: "felt good", one dip at the end of the fight with Sakura: at the match end the game saves (opens
   savedata:\30x, LIST, save.dat, save-swan.dat, replays-swan.dat, 18-31 ms each on the SD, ~100 ms in all, main-thread
   frame 42.9 ms) and ~12 s later loads the next scene (174 ms frame, "the rest", announcer RYU_NML_J.cpk open 16 ms).
+
+### 0.7.4: faster save-file opens (2026-10-19)
+
+0.7.3 console: at a match end the game opens savedata:\30x, LIST, save.dat, save-swan.dat and replays-swan.dat with
+FILE_OVERWRITE_IF (disposition 5), 18-31 ms each on the SD. The VFS overwrite was stat (stale-entry check) + delete +
+create (fopen "wb", fclose, stat) + open.
+- 0.7.4 test: an existing file is truncated in place (HostPathEntry::Truncate, the old fallback); delete + recreate is
+  now the fallback. Console: 12-21 ms per file; the new "[io] open steps" line: check (the stat) 2-8 ms, replace
+  (truncate) 5-12, open 0.5-2.4. Save loaded fine after a restart.
+- 0.7.4 test2: FILE_OVERWRITE_IF on a file skips the stat (the truncation recreates a file that vanished).
+- Fight hitches (0.7.4 test, user: "at the same points" each fight): single 44-46 ms frames, all "the rest" (game work
+  on the main thread), e.g. 22:05:29.67 and 22:05:59.64 (30.0 s apart, as 22:39:12 / 22:39:42 / 22:40:12 on
+  2026-10-17). Profiling builds now sample the "Main XThread" at every tick (1 ms) besides the round robin, and game
+  frames over 30 ms register hitch windows (usf4_frame_counter.cpp), so the hitch section shows its stacks.
