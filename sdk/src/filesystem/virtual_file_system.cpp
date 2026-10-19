@@ -9,6 +9,8 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <chrono>
+
 #include <rex/filesystem/vfs.h>
 #include <rex/logging.h>
 #include <rex/string.h>
@@ -229,6 +231,12 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
     entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
   }
 
+  // usf4-nx: the steps of an open on a writable device, timed (saves: 18-31 ms per open on the Switch SD).
+  using clock = std::chrono::steady_clock;
+  const auto t_start = clock::now();
+  auto t_check = t_start, t_replace = t_start, t_create = t_start;
+  const bool writable = parent_entry && !parent_entry->is_read_only();
+
   if (entry) {
     if (entry->attributes() & kFileAttributeDirectory && is_non_directory) {
       return X_STATUS_FILE_IS_A_DIRECTORY;
@@ -254,6 +262,8 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
       }
     }
   }
+
+  t_check = clock::now();
 
   // Check if exists (if we need it to), or that it doesn't (if it shouldn't).
   switch (creation_disposition) {
@@ -314,17 +324,20 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
         break;
       case FileDisposition::kOverwrite:
       case FileDisposition::kOverwriteIf:
-        // Overwrite by delete + recreate, or truncate if delete fails
-        // (host file may be briefly locked by cloud sync, AV, etc.).
-        if (entry->Delete()) {
+        // usf4-nx: truncate in place first (one host open with O_TRUNC); delete + recreate only if that fails.
+        // On the Switch SD the delete + create + stat of the old way was most of an 18-31 ms save open. The
+        // result is the same empty file under the same entry.
+        if (entry->Truncate()) {
+        } else if (entry->Delete()) {
           entry = nullptr;
-        } else if (!entry->Truncate()) {
+        } else {
           return X_STATUS_ACCESS_DENIED;
         }
         *out_action = FileAction::kOverwritten;
         break;
     }
   }
+  t_replace = clock::now();
   if (!entry) {
     // Create if needed (either new or as a replacement).
     entry = CreatePath(path, !is_directory ? kFileAttributeNormal : kFileAttributeDirectory);
@@ -332,11 +345,24 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry, const std::string_view p
       return X_STATUS_ACCESS_DENIED;
     }
   }
+  t_create = clock::now();
 
   // Open.
   auto result = entry->Open(desired_access, out_file);
   if (XFAILED(result)) {
     *out_action = FileAction::kDoesNotExist;
+  }
+  if (writable) {
+    const auto t_end = clock::now();
+    const auto us = [](clock::duration d) {
+      return double(std::chrono::duration_cast<std::chrono::microseconds>(d).count()) / 1000.0;
+    };
+    if (t_end - t_start >= std::chrono::milliseconds(5)) {
+      REXFS_INFO("[io] open steps '{}' (disposition {}, action {}): check {:.1f} ms, replace {:.1f}, create {:.1f}, "
+                 "open {:.1f}",
+                 path, uint32_t(creation_disposition), uint32_t(*out_action), us(t_check - t_start),
+                 us(t_replace - t_check), us(t_create - t_replace), us(t_end - t_create));
+    }
   }
   return result;
 }
