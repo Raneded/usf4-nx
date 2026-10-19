@@ -822,3 +822,14 @@ end of a match was 35.5 ms of waiting for the game's jobs while it opened its sa
 Frames right after a long one sometimes wait 18-23 ms for the GPU ring (the ring catching up: a 66 ms ring frame with
 60 new textures, 14 MB, at a new effect). The stack samples caught nothing inside single ~45 ms windows (too few
 samples per window). Not pursued: they are the game's own loads / effect set-up.
+
+### 0.7.3: constants up to the last declared register (2026-10-19)
+
+Console 0.7.3 test (C6 substages 19-23, ~400 draws, ring 9.1 ms per Swap): uploads 2.9 us per draw = textures 0.05,
+vertices 1.4-1.6, indices 0.4, VS constants ~1.0, PS constants 0.37; indices stage "indices" 1.4. PC: vertices 1.0,
+VS constants 0.4. VS constants were uploaded again for ~85 % of draws, and every shader whose constant table has an
+array or matrix (RegisterCount > 1) counted as reading all 256 registers (4 KB copy), because XenosRecomp clamps
+relative reads of an array to register 255. usf4_cpu_constants_exact_extent (on): without relative operands (no ALU
+instruction with dword 1 bit 30/31, checked on every ALU instruction) the extent is the end of the last declared
+Float4 constant. PC: 242 shaders narrowed; lockstep frames vs off median 0.23 mean abs diff (the same path in two
+builds: 0.43).
