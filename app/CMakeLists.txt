@@ -226,7 +226,7 @@ if(REXGLUE_PLATFORM_SWITCH)
 
     # The homebrew menu's entry (app/icon.jpg: an original 256x256 JPEG made for this port by tools/make_icon.py, no game artwork). A personal
     # app/icon_local.jpg (256x256 JPEG, git-ignored: it may be game artwork) replaces it when present.
-    set(USF4_NRO_ICON "${USF4_NRO_ICON}")
+    set(USF4_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icon_local.jpg")
         set(USF4_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon_local.jpg")
     endif()
