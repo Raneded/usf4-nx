@@ -852,3 +852,10 @@ create (fopen "wb", fclose, stat) + open.
   on the main thread), e.g. 22:05:29.67 and 22:05:59.64 (30.0 s apart, as 22:39:12 / 22:39:42 / 22:40:12 on
   2026-10-17). Profiling builds now sample the "Main XThread" at every tick (1 ms) besides the round robin, and game
   frames over 30 ms register hitch windows (usf4_frame_counter.cpp), so the hitch section shows its stacks.
+- 0.7.4 profiling test2 on the console (2026-10-19): save opens now "check 0.0 ms", truncate 9-23 ms, open 0.4-4.8:
+  the FAT truncation (freeing the old clusters) is what is left. Main thread sampled every ms: in the fight hitches
+  (single 43-50 ms frames, "the rest") its samples are, besides the frame limiter and the job wait, the game's own job
+  work run on the main thread: sub_82966C90 (batch wait) -> sub_82967288 (run a job) -> sub_8219B6E0 ->
+  sub_82925E40 -> sub_8292B7A8 -> sub_828BB588 -> sub_829CD8D0 (682 lines; calls sub_82183D60, sub_828B9280,
+  sub_828B88B8, sub_828B72D8). Game logic at specific moments (round start, KO, REVERSAL / SUPER pop-ups, some 30 s
+  apart): not a renderer wait; not pursued further (it would mean rewriting game code natively).
