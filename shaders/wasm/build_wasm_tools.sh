@@ -33,9 +33,11 @@ for t in $targets; do
   case $t in
     hlsl)
       em++ -std=c++20 -O1 -I"$SHADERS" -I"$XENOS" -I"$FMT_DIR" -I"$XXHASH_DIR" -include "$XENOS/pch_min.h" \
-        -Wno-null-arithmetic -fms-extensions -DFMT_HEADER_ONLY -DXXH_INLINE_ALL -DMASSEFFECT_RECOMP \
+        -Wno-null-arithmetic -fms-extensions -DFMT_HEADER_ONLY -DXXH_INLINE_ALL -DMASSEFFECT_RECOMP -fwasm-exceptions \
         "$SHADERS/tools/masseffect_hlsl.cpp" "$XENOS/shader_recompiler.cpp" -o "$OUT/hlsl.mjs" \
         -sEXPORT_NAME=createHlslModule "${COMMON[@]}";;
+      # usf4-nx: -fwasm-exceptions, so a container the translator rejects with an exception is skipped as in the
+      # native build (USF4's package has one), instead of aborting the whole module.
     pack)
       # The full library (30k shaders, ~900 MB) needs the whole 4 GB address space of wasm32.
       em++ -std=c++20 -O2 -I"$XXHASH_DIR" "$SHADERS/tools/me_pack_shaders.cpp" "$APP/sa2_shader_library.cpp" \
