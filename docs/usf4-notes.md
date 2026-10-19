@@ -859,3 +859,25 @@ create (fopen "wb", fclose, stat) + open.
   sub_82925E40 -> sub_8292B7A8 -> sub_828BB588 -> sub_829CD8D0 (682 lines; calls sub_82183D60, sub_828B9280,
   sub_828B88B8, sub_828B72D8). Game logic at specific moments (round start, KO, REVERSAL / SUPER pop-ups, some 30 s
   apart): not a renderer wait; not pursued further (it would mean rewriting game code natively).
+
+## Public release: NRO + installer page (2026-10-19/20)
+
+User decision (2026-10-19): the repository goes public, releases carry the NRO (never game files or shaders), and a
+browser installer makes the rest from the player's own disc, like sa2-nx's. Author name rewritten to Thorhax in all 57
+commits and 8 tags (filter-branch, trees verified identical, force-pushed).
+- `tools/installer_recipe.py`: per container of the package input (out/shaders/in, 874), a source in the player's
+  files (EMZ stream slice, game file slice or default.xex image slice) plus patch runs; 847 as they are (6 game files
+  and the image), 27 patched (3.1 KB), 15 Direct3D builds at run time carried inline (5.1 KB). `--check`: 0 mismatches.
+- sa2-nx-installer's xex.js + LZX wasm decompress Default.xex to exactly out/default_image.bin.
+- WebAssembly tools built from this repository with Emscripten 6.0.12 (`shaders/wasm/build_wasm_tools.sh`, translator
+  now with -fwasm-exceptions: the one container the translator rejects, vs_vc43fc0b1422d5b97, is skipped as natively):
+  HLSL identical for 873 of 873. DXC: nfsmw-nx-installer's v2025.1 wasm (same file as sa2-nx's); its SPIR-V differs
+  from the PC's DXC 1.9 for 767 of 873 shaders. Library from the ISO in Node (usf4-nx-installer test/release_node.mjs):
+  sha256 201e0bf7..., identical to the one built from out/shaders/in. PC lockstep with it: 0 draw failures, frames
+  differ from the native library only on the moving characters (animation drift; median 1.19 this run, background and
+  HUD identical).
+- usf4-nx-installer (local repo): lib/xdvdfs.js (ISO in place), lib/shaders.js (recipe, EMZ via DecompressionStream
+  'deflate-raw'), lib/installer.js; full usf4-nx.zip from the ISO in Node: 8.1 GB, 976 entries, 159 s, CRCs fine,
+  Default.xex and battle.eaf byte-identical.
+- The Switch NRO had libnx's default icon (USF4_NRO_ICON defaulted to empty when icon_local.jpg was absent): fixed to
+  app/icon.jpg. Release NRO built without icon_local.jpg: its icon is app/icon.jpg byte for byte.
