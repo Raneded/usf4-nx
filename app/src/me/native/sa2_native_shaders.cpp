@@ -44,6 +44,10 @@ SA2_ENHANCEMENT(g_vs_fetch_reorder, sa2_gpu_vs_fetch_reorder, sa2::enh::kNonCpu,
                 "tool's proof at run time, when no library entry has that order (such draws were dropped: the Chao "
                 "garden's stats window)");
 
+SA2_ENHANCEMENT(g_constants_exact_extent, usf4_cpu_constants_exact_extent, sa2::enh::kCpu, true,
+                "Shaders without relative constant operands upload their float constants up to the last declared "
+                "register instead of all 256 when they have an array or matrix");
+
 namespace sa2::native {
 namespace {
 
@@ -232,6 +236,31 @@ bool AluReadsR0(const std::vector<uint32_t>& w) {
 // Scaleform shaders have an empty CTAB even though their microcode samples s0; without this scan the
 // native renderer leaves descriptor index 0 in the shared block and every glyph samples the transparent
 // fallback texture. The control-flow walk is the same one used above for vertex fetches.
+// usf4-nx (usf4_cpu_constants_exact_extent): whether any ALU instruction of the shader has a relative constant
+// operand (dword 1 bits 30-31, XenosRecomp AluInstruction const1Relative / const0Relative). Only those read a
+// constant array past its declared registers (up to register 255, shader_recompiler.cpp); the bits are checked on
+// every ALU instruction, whatever its operands, so a doubt counts as relative.
+bool UsesRelativeConstants(const std::vector<uint32_t>& w) {
+  uint32_t end = uint32_t(w.size() / 3);
+  for (uint32_t par = 0; par < end && par * 3 + 2 < w.size(); ++par) {
+    const uint64_t cf[2] = {uint64_t(w[par * 3]) | (uint64_t(w[par * 3 + 1] & 0xFFFF) << 32),
+                            uint64_t(w[par * 3 + 1] >> 16) | (uint64_t(w[par * 3 + 2]) << 16)};
+    for (uint64_t c : cf) {
+      const uint32_t opcode_cf = uint32_t(c >> 44) & 0xF;
+      if (!((opcode_cf >= 1 && opcode_cf <= 6) || opcode_cf == 13 || opcode_cf == 14)) continue;
+      const uint32_t address = uint32_t(c) & 0xFFF, count = uint32_t(c >> 12) & 0x7;
+      const uint32_t sequence = uint32_t(c >> 16) & 0xFFF;
+      if (address != 0) end = std::min(end, address);
+      for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t index = address + i;
+        if (((sequence >> (i * 2)) & 0x1) || size_t(index) * 3 + 2 >= w.size()) continue;  // fetch
+        if (w[index * 3 + 1] & 0xC0000000u) return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::vector<uint32_t> FetchesOfTextures(const std::vector<uint32_t>& w) {
   std::vector<uint32_t> registers;
   uint32_t end = uint32_t(w.size() / 3);
@@ -369,7 +398,10 @@ const char* Read(const sa2::native::Shader& shader, ShaderEntry& e) {
   // Float registers the SPIR-V reads: the highest in the table, or up to the end of the
   // buffer if there is an array with relative indexing (XenosRecomp shader_recompiler.cpp:
   // 1172-1183: tailCount = 256 in VS and 224 in PS).
-  uint32_t registers_float = 0;
+  // usf4-nx (usf4_cpu_constants_exact_extent): without relative operands, an array is read only inside its own
+  // registers, so the extent is the end of the last one (a 4x4 matrix no longer means all 256 registers: ~85 % of
+  // USF4's draws copied the whole 4 KB VS bank).
+  uint32_t registers_float = 0, registers_declared = 0;
   for (uint32_t i = 0; i < constants; ++i) {
     const size_t p = base + info + size_t(i) * 20;
     if (c.U16(p + 4) == 2) {  // RegisterSet::Float4
@@ -377,7 +409,13 @@ const char* Read(const sa2::native::Shader& shader, ShaderEntry& e) {
       const uint32_t how_many = c.U16(p + 8);
       registers_float = std::max(registers_float, how_many > 1 ? 256u
                                                               : index + 1);
+      registers_declared = std::max(registers_declared, index + std::max<uint32_t>(how_many, 1));
     }
+  }
+  if (registers_float > registers_declared && g_constants_exact_extent.active &&
+      !UsesRelativeConstants(e.microcode)) {
+    g_constants_exact_extent.Use();
+    registers_float = registers_declared;
   }
   e.constants_bytes = std::min<uint32_t>(std::max<uint32_t>(registers_float, 1), 256) * 16;
   for (uint32_t i = 0; i < constants; ++i) {
