@@ -6,9 +6,9 @@ A static recompilation of **Ultra Street Fighter IV** (Xbox 360, title 434307FC)
 the ReXGlue SDK. It follows the method of
 [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) (`docs/porting-a-360-game-prompt.md`).
 
-**This repository holds no game data.** You need your own copy of the game. The code generated from `default.xex`,
-the shaders extracted from the game and the binaries built from them are never committed; everyone builds them from
-their own disc.
+**This repository holds no game data.** You need your own copy of the game: the Xbox 360 disc, dumped to a plain
+`.iso`. The game files and the shaders made from them are never committed or published; the installer makes them from
+your own disc.
 
 ## Status
 
@@ -17,6 +17,27 @@ their own disc.
   docked-mode clocks (set with sys-clk; tested with memory at 2700 MHz). Video clip recording is turned off.
 
 Version history, measurements and every finding: [docs/usf4-notes.md](docs/usf4-notes.md).
+
+## How to install (Switch)
+
+1. Open the installer page: **https://thorhax.github.io/usf4-nx-installer/**
+2. Choose your game's disc image (a plain `.iso` of the Xbox 360 disc, about 8.7 GB, not a compressed CCI/GOD/ZAR
+   image) or a folder you extracted the disc into, then press **Create usf4-nx.zip**. Everything runs in your browser
+   and your game files never leave your computer: the page checks your copy, downloads the Switch build from this
+   repository's releases, and makes the shaders and the game folder from your files.
+3. Extract the downloaded `usf4-nx.zip` (about 8 GB) into `sdmc:/switch/`.
+
+Your `usf4-nx` folder then holds `usf4.nro`, `LICENSES.txt`, the shader package (`sa2_shaders.mesp` + `.idx`) and the
+game files in `game_root/`. Start `usf4.nro` with a title takeover (hold **R** while launching an installed game) or a
+forwarder with full memory; the album applet does not give the game enough memory. The game writes `usf4.toml` (your
+settings) at its first start.
+
+**Updating:** open the installer page again and press **Create usf4-nx-update.zip**: it only holds the new NRO and the
+shaders. Extract it over your folder; your settings and game files stay.
+
+**The first time you play,** new places can stutter for a moment while the graphics pipelines are compiled; they are
+kept on the SD card for the next sessions. Fights hold 60 fps with the CPU at 1785 MHz and the GPU at 768 MHz (set with
+sys-clk; memory tested at 2700 MHz).
 
 ## Building
 
