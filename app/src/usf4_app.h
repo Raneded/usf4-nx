@@ -93,8 +93,8 @@ class Usf4App : public rex::ReXApp {
   // Stage 4: with sa2_renderer_native = true the graphics system is the native Vulkan renderer (src/me), and the
   // emulated Xenos GPU plugin is not loaded (ReXApp only loads it when config.graphics is empty).
   void OnPreSetup(rex::RuntimeConfig& config) override {
-    // The intro video first, while nothing has the window or the audio device yet.
-    thorhax::intro::Play();
+    // The intro video, while the game boots behind it (nothing has the window or the audio device yet).
+    thorhax::intro::Start();
     config.input_factory = usf4::script_input::CreateInputSystem;
     sa2::enh::ApplyGpuBoost();
     if (me::native::Enabled()) {

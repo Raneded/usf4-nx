@@ -1,19 +1,15 @@
-// Thorhax intro (thorhax_intro.h): the startup video, played before the game opens the window and the audio device.
+// Thorhax intro (thorhax_intro.h): the startup video, played while the game boots behind it.
 //
 // HOW
-//   The video is MPEG-1 (thorhax_intro.mpg, decoded by pl_mpeg) and the sound raw 48 kHz stereo PCM
-//   (thorhax_intro.pcm), both linked into the executable; make_intro.sh makes them from the source video. A decode
-//   thread on core 1 keeps a few frames ahead in a small queue. The main thread shows the frame due at the audio
-//   clock (samples audout has played), converting it to RGBA straight into a linear libnx framebuffer; a frame that is
-//   already late is dropped rather than shown late. Afterwards the screen is left black, and the framebuffer and
-//   audout are closed so the game's Vulkan swapchain and audio system can open them as usual.
+//   Start holds the SDK's output and returns; the game boots meanwhile (unseen, unheard, controllers untouched). The
+//   video is MPEG-1 (thorhax_intro.mpg, decoded by pl_mpeg) and the sound raw 48 kHz stereo PCM (thorhax_intro.pcm),
+//   both linked into the executable; make_intro.sh makes them from the source video. A decode thread on core 1 keeps a
+//   few frames ahead in a small queue. The player thread (core 2) shows the frame due at the audio clock (samples
+//   audout has played), converting it to RGBA straight into a linear libnx framebuffer; a frame that is already late
+//   is dropped rather than shown late. Afterwards the framebuffer and audout are closed and the output is released:
+//   the game's window gets its Vulkan swapchain and its audio output opens the device.
 
 #include "thorhax_intro.h"
-
-#include <rex/cvar.h>
-#include <rex/logging.h>
-
-REXCVAR_DEFINE_BOOL(thorhax_intro, true, "Switch", "Play the Thorhax intro video at startup");
 
 #if defined(__SWITCH__)
 
@@ -26,15 +22,15 @@ REXCVAR_DEFINE_BOOL(thorhax_intro, true, "Switch", "Play the Thorhax intro video
 #include <cstring>
 #include <memory>
 
+#include <rex/logging.h>
+
 #include <switch.h>
 
 #include "pl_mpeg.h"
 
-extern "C" {
-// libnx runtime internals, for an exit requested while the intro plays (as in windowed_app_main_switch.cpp).
-extern u32 __nx_applet_exit_mode;
-NX_NORETURN void __libnx_exit(int rc);
-}
+// The SDK's output hold (windowed_app_context_switch.h).
+extern "C" void RexSwitchHoldOutput(void);
+extern "C" void RexSwitchReleaseOutput(void);
 
 // The video and its sound, linked in (THORHAX_INTRO_DIR comes from thorhax_intro.cmake; this file is built without
 // LTO so the symbols defined here stay visible to the linker).
@@ -64,6 +60,8 @@ namespace thorhax::intro {
 namespace {
 
 constexpr double kUnskippableSeconds = 3.0;
+// Held together, at any time.
+constexpr u64 kSecretSkip = HidNpadButton_Minus | HidNpadButton_Plus;
 constexpr u64 kSkipButtons = HidNpadButton_A | HidNpadButton_B | HidNpadButton_X | HidNpadButton_Y |
                              HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R |
                              HidNpadButton_ZL | HidNpadButton_ZR;
@@ -72,8 +70,10 @@ constexpr u32 kWidth = 1280;
 constexpr u32 kHeight = 720;
 // Decoded frames kept ahead of the display: room for the slower intra frames.
 constexpr uint32_t kSlots = 6;
+// Above the game's threads (0x3B), so its loading does not make the video stutter.
 constexpr int kDecodeCore = 1;
-constexpr int kDecodePriority = 0x2C;
+constexpr int kPlayerCore = 2;
+constexpr int kThreadPriority = 0x2C;
 constexpr u32 kSampleRate = 48000;
 constexpr u32 kBytesPerSample = 4;  // s16 stereo
 // Four 100 ms audout buffers, refilled as they come back.
@@ -238,12 +238,8 @@ void ShowBlack(Framebuffer& fb) {
   framebufferEnd(&fb);
 }
 
-}  // namespace
-
-void Play() {
-  if (!REXCVAR_GET(thorhax_intro)) {
-    return;
-  }
+// The intro's own thread: everything from opening the framebuffer to giving the output back.
+void PlayerMain(void*) {
   const u64 started = armGetSystemTick();
   auto seconds_since = [](u64 tick) { return double(armTicksToNs(armGetSystemTick() - tick)) / 1e9; };
 
@@ -252,6 +248,7 @@ void Play() {
                                         size_t(thorhax_intro_video_end - thorhax_intro_video), 0);
   if (!decoder->plm) {
     REXLOG_WARN("intro: the video could not be opened");
+    RexSwitchReleaseOutput();
     return;
   }
   plm_set_audio_enabled(decoder->plm, 0);
@@ -261,6 +258,7 @@ void Play() {
   if (width != int(kWidth) || height != int(kHeight) || fps <= 0.0) {
     REXLOG_WARN("intro: the video is {}x{} at {} fps, not {}x{}", width, height, fps, kWidth, kHeight);
     plm_destroy(decoder->plm);
+    RexSwitchReleaseOutput();
     return;
   }
   const size_t luma = size_t((width + 15) & ~15) * ((height + 15) & ~15);
@@ -281,6 +279,7 @@ void Play() {
   if (R_FAILED(rc)) {
     REXLOG_WARN("intro: no framebuffer: 0x{:08X}", rc);
     plm_destroy(decoder->plm);
+    RexSwitchReleaseOutput();
     return;
   }
   ShowBlack(fb);
@@ -290,7 +289,7 @@ void Play() {
   PadState pad{};
   padInitializeAny(&pad);
 
-  rc = threadCreate(&decoder->thread, DecodeMain, decoder.get(), nullptr, 0x20000, kDecodePriority, kDecodeCore);
+  rc = threadCreate(&decoder->thread, DecodeMain, decoder.get(), nullptr, 0x20000, kThreadPriority, kDecodeCore);
   if (R_SUCCEEDED(rc)) {
     rc = threadStart(&decoder->thread);
     if (R_FAILED(rc)) {
@@ -301,6 +300,7 @@ void Play() {
     REXLOG_WARN("intro: no decode thread: 0x{:08X}", rc);
     framebufferClose(&fb);
     plm_destroy(decoder->plm);
+    RexSwitchReleaseOutput();
     return;
   }
   // A full queue before the sound starts.
@@ -319,17 +319,18 @@ void Play() {
 
   uint32_t shown = 0;
   uint32_t dropped = 0;
-  double skipped_at = -1.0;
-  bool exit_requested = false;
+  const char* ending = "ended";
+  double ended_at = 0.0;
   for (;;) {
-    if (!appletMainLoop()) {
-      exit_requested = true;
-      break;
-    }
     padUpdate(&pad);
     const double now = clock();
+    ended_at = now;
+    if ((padGetButtons(&pad) & kSecretSkip) == kSecretSkip) {
+      ending = "skipped with - and +";
+      break;
+    }
     if (now >= kUnskippableSeconds && (padGetButtonsDown(&pad) & kSkipButtons)) {
-      skipped_at = now;
+      ending = "skipped";
       break;
     }
     audio.Pump();
@@ -354,7 +355,7 @@ void Play() {
       break;
     }
     if (seconds_since(started) > double(kMaxSeconds)) {
-      REXLOG_WARN("intro: stopped after {} s", kMaxSeconds);
+      ending = "stopped by the time limit";
       break;
     }
     svcSleepThread(2'000'000);
@@ -367,19 +368,31 @@ void Play() {
   ShowBlack(fb);
   framebufferClose(&fb);
   plm_destroy(decoder->plm);
+  // The game's swapchain and audio from here on.
+  RexSwitchReleaseOutput();
 
   const uint32_t decoded = decoder->written.load(std::memory_order_acquire);
-  REXLOG_INFO("intro: {} of {} frames shown ({} late), decode {:.1f} ms average / {:.1f} ms slowest, {} after {:.1f} s",
+  REXLOG_INFO("intro: {} of {} frames shown ({} late), decode {:.1f} ms average / {:.1f} ms slowest; {} at {:.1f} s "
+              "({:.1f} s after the start)",
               shown, decoded, dropped,
               decoded ? double(armTicksToNs(decoder->total_decode_ticks / decoded)) / 1e6 : 0.0,
-              double(armTicksToNs(decoder->max_decode_ticks)) / 1e6,
-              exit_requested ? "exit requested" : skipped_at >= 0.0 ? "skipped" : "ended",
-              seconds_since(started));
-  if (exit_requested) {
-    rex::FlushLogging();
-    std::fflush(nullptr);
-    __nx_applet_exit_mode = 1;
-    __libnx_exit(0);
+              double(armTicksToNs(decoder->max_decode_ticks)) / 1e6, ending, ended_at, seconds_since(started));
+}
+
+Thread g_player{};
+
+}  // namespace
+
+void Start() {
+  // Before anything can open the window or the audio device.
+  RexSwitchHoldOutput();
+  Result rc = threadCreate(&g_player, PlayerMain, nullptr, nullptr, 0x20000, kThreadPriority, kPlayerCore);
+  if (R_SUCCEEDED(rc)) {
+    rc = threadStart(&g_player);
+  }
+  if (R_FAILED(rc)) {
+    REXLOG_WARN("intro: no player thread: 0x{:08X}", rc);
+    RexSwitchReleaseOutput();
   }
 }
 
@@ -389,7 +402,7 @@ void Play() {
 
 namespace thorhax::intro {
 
-void Play() {}
+void Start() {}
 
 }  // namespace thorhax::intro
 
