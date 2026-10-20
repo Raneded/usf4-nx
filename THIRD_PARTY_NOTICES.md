@@ -93,6 +93,6 @@ license terms; SPIRV-Tools Apache-2.0; SPIRV-Headers MIT).
 
 ## Trademarks
 
-Sonic Adventure 2 and Sonic the Hedgehog are trademarks of SEGA; the icon (`app/icon.jpg`) is SEGA's artwork. Nintendo
-Switch is a trademark of Nintendo. Xbox 360 and Xbox Live Arcade are trademarks of Microsoft. This project is not
-affiliated with or endorsed by any of them.
+Ultra Street Fighter IV and Street Fighter are trademarks of Capcom. The icon (`app/icon.jpg`) and the intro video
+(`app/thorhax_intro`) are the project's own and contain no Capcom artwork. Nintendo Switch is a trademark of Nintendo.
+Xbox 360 is a trademark of Microsoft. This project is not affiliated with or endorsed by any of them.

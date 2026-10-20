@@ -881,3 +881,17 @@ commits and 8 tags (filter-branch, trees verified identical, force-pushed).
   Default.xex and battle.eaf byte-identical.
 - The Switch NRO had libnx's default icon (USF4_NRO_ICON defaulted to empty when icon_local.jpg was absent): fixed to
   app/icon.jpg. Release NRO built without icon_local.jpg: its icon is app/icon.jpg byte for byte.
+
+## Thorhax intro video (0.7.5, 2026-10-20)
+
+User decision: every Thorhax port starts with the Thorhax intro (app/thorhax_intro, self-contained for other ports).
+The first 3 s cannot be skipped, then any button ends it; - and + held together end it at any time. There is
+deliberately no toml or cvar to turn it off (redistributors would).
+- MPEG-1 (pl_mpeg, q3, no B-frames, 3.46 MB) + raw 48 kHz stereo PCM, linked with .incbin; libnx framebuffer on the
+  default window, sound through audout, its clock from the played sample count. Player on core 2, decoder on core 1.
+- It plays while the game boots: RexSwitchHoldOutput keeps the window without a surface, the audio output silent but
+  consuming in real time and the pads untouched (until all buttons are up after the release). The release reconnects
+  the surface on the UI thread and opens the audio device.
+- Console (handheld): 169 of 169 frames, 0 late, decode 6.3 ms average / 11.5 ms slowest. The game reads its files
+  from about 2 s into the intro and is at its normal frame pacing when it ends; its swapchain comes up about 4 ms
+  after the intro (v1, intro before the boot: 1.5 s of GPU-clock check plus 2-4 s of loading on black).
