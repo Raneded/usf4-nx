@@ -93,6 +93,10 @@ else()
     add_executable(usf4 ${USF4_SOURCES})
 endif()
 
+# The Thorhax intro video at startup (app/thorhax_intro; plays on the Switch only).
+include(thorhax_intro/thorhax_intro.cmake)
+thorhax_intro_add(usf4)
+
 # The codegen flavour (tools/codegen.sh --flavor) names the build in the first "[enh]" log line (sa2-nx).
 set(USF4_FLAVOR_FILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/codegen_flavor.txt")
 set(USF4_BUILD_FLAVOR "classic codegen")
@@ -233,6 +237,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "Thorhax"
-        VERSION "0.7.4"
+        VERSION "0.7.5"
         ICON "${USF4_NRO_ICON}")
 endif()

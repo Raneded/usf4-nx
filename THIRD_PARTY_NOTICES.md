@@ -57,6 +57,7 @@ submodules into `sdk/thirdparty`.
 | [utfcpp](https://github.com/nemtrif/utfcpp) | BSL-1.0 |
 | [CLI11](https://github.com/CLIUtils/CLI11) | BSD-3-Clause |
 | [aes_128](https://github.com/openluopworld/aes_128) by LuoPeng, [tiny-AES-c](https://github.com/kokke/tiny-AES-c) | see the license file of each in the fetched tree (`sdk/thirdparty/aes_128`, `sdk/thirdparty/tiny-aes-c`) |
+| [pl_mpeg](https://github.com/phoboslab/pl_mpeg) by Dominic Szablewski (MPEG-1 decoder of the intro video), stored unmodified in `app/thorhax_intro/pl_mpeg.h` (commit `c871f2b`) | MIT |
 | disruptorplus, the RenderDoc API header and the PowerPC disassembler (`disasm`) as shipped with ReXGlue SDK v0.10.0 | see the license file of each in the fetched tree |
 | [libnx](https://github.com/switchbrew/libnx) and the devkitA64 runtime (newlib, libstdc++) | ISC; newlib and GCC runtime licenses |
 | zlib, Zstandard and Expat, from devkitPro's Switch portlibs (linked for Mesa) | zlib License; BSD-3-Clause; MIT |
