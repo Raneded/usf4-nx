@@ -10,7 +10,8 @@ for the vertex declaration) and Direct3D's own shaders, whose containers sit in 
 For every container of the package's input folder this finds a source of the same size in the player's files and
 records the bytes that differ, as runs of (offset, hex). A source is one of:
 
-    {"emz": [path, offset of "#EMZ"], "at": n}   a slice of an unpacked EMZ stream
+    {"emz": [path, offset of "#EMZ"], "at": n}   a slice of an unpacked EMZ stream (its compressed length is in the
+                                                recipe's "emz_lengths", keyed "path@offset")
     {"file": path, "at": n}                     a slice of a game file as it is on the disc
     {"image": n}                                a slice of default.xex's decompressed image (based at 0x82000000)
 
@@ -193,8 +194,35 @@ def build(a):
     print(f"read from {len(files)} game files and the image")
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
-        json.dump({"version": 1, "containers": entries}, f, indent=0)
+        json.dump({"version": 1, "emz_lengths": emz_lengths(a.game_root, entries), "containers": entries}, f,
+                  indent=0)
     return 1 if unsolved else 0
+
+
+def emz_lengths(root, entries):
+    """{"path@offset of #EMZ": compressed length} of every EMZ stream the recipe reads. The page reads exactly that
+    much: Chrome's DecompressionStream fails on data after the end of the stream ("Junk found after end of compressed
+    data"), and can do so before it hands out the stream's last bytes."""
+    out = {}
+    for e in entries:
+        for loc in (e.get("source"), e.get("header"), e.get("microcode")):
+            if not loc or "emz" not in loc:
+                continue
+            path, emz_at = loc["emz"]
+            key = f"{path}@{emz_at}"
+            if key in out:
+                continue
+            with open(os.path.join(root, path), "rb") as f:
+                data = f.read()
+            size, offset = struct.unpack_from("<II", data, emz_at + 8)
+            start = emz_at + offset
+            chunk = data[start:start + size + (1 << 20)]
+            d = zlib.decompressobj(-15)
+            unpacked = d.decompress(chunk) + d.flush()
+            if not d.eof or len(unpacked) != size:
+                raise SystemExit(f"{key}: the EMZ stream does not end where expected")
+            out[key] = len(chunk) - len(d.unused_data)
+    return dict(sorted(out.items()))
 
 
 def read_locator(root, image, src, size, cache):

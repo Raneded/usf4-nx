@@ -356,6 +356,9 @@ struct SwitchInputDriver::Slot {
   HidNpadIdType npad_id = HidNpadIdType_No1;
   PadState pad{};
   bool connected = false;
+  // A button pressed since it connected: only then is it a device (a player), so players are numbered in the order
+  // their controllers are first used, not in slot order (see EnumerateDevices).
+  bool pressed = false;
   DeviceId id = DeviceId::kInvalid;
   // The guest player this controller is (0 = player 1), as the input system assigned it (OnDevicesAssigned): picks
   // the button table (player 2's map for player 2, player 1's for the others).
@@ -555,6 +558,13 @@ extern "C" bool RexSwitchOutputHeld(void);
 namespace {
 // Per slot: the controller reads as untouched until all its buttons are up again.
 std::array<bool, 16> g_quiet_until_released{};
+// Real buttons: padGetButtons also sets the sticks' pseudo-buttons (bits 16-23) while a stick is tilted.
+constexpr uint64_t kRealButtons =
+    0xFFFFull | HidNpadButton_LeftSL | HidNpadButton_LeftSR | HidNpadButton_RightSL | HidNpadButton_RightSR;
+const char* SlotName(size_t index) {
+  static constexpr const char* kNames[] = {"handheld", "No1", "No2", "No3", "No4"};
+  return index < std::size(kNames) ? kNames[index] : "?";
+}
 }  // namespace
 
 void SwitchInputDriver::Poll(size_t index) {
@@ -564,6 +574,9 @@ void SwitchInputDriver::Poll(size_t index) {
   const bool connected = padIsConnected(&slot.pad);
   if (connected != slot.connected) {
     slot.connected = connected;
+    REXLOG_INFO("input: {} controller {} (style 0x{:X})", SlotName(index), connected ? "connected" : "disconnected",
+                padGetStyleSet(&slot.pad));
+    slot.pressed = false;
     if (connected) {
       slot.id = DeviceId((uint64_t(++connection_counter_) << 32) | (kDeviceIdTag << 8) | index);
       slot.state = {};
@@ -580,14 +593,19 @@ void SwitchInputDriver::Poll(size_t index) {
   }
 
   uint64_t held = padGetButtons(&slot.pad);
+  if (!slot.pressed && (held & kRealButtons)) {
+    slot.pressed = true;
+    REXLOG_INFO("input: {} controller used: it becomes the next free player", SlotName(index));
+  }
   HidAnalogStickState left = padGetStickPos(&slot.pad, 0);
   HidAnalogStickState right = padGetStickPos(&slot.pad, 1);
   // While a startup video plays, and afterwards until every button is up (so the press that skipped it does not reach
-  // the game), the game and the menu shortcuts see an untouched controller.
+  // the game), the game and the menu shortcuts see an untouched controller. Only real buttons count: padGetButtons also
+  // sets the sticks' pseudo-buttons while a stick is tilted, and a drifting stick would keep it quiet.
   bool& quiet = g_quiet_until_released[index % g_quiet_until_released.size()];
   if (RexSwitchOutputHeld()) {
     quiet = true;
-  } else if (quiet && held == 0) {
+  } else if (quiet && (held & kRealButtons) == 0) {
     quiet = false;
   }
   if (quiet) {
@@ -782,7 +800,9 @@ void SwitchInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   for (size_t i = 0; i < kSlotCount; ++i) {
     Poll(i);
     const Slot& slot = *slots_[i];
-    if (!slot.connected) {
+    // Not a device until it is used: the input system gives each new device the lowest free player, so the controller
+    // in hand is player 1 (the only signed-in one) whatever slot it has, and the next one used is player 2.
+    if (!slot.connected || !slot.pressed) {
       continue;
     }
     DeviceInfo info;
@@ -809,13 +829,20 @@ void SwitchInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
 
 void SwitchInputDriver::OnDevicesAssigned(const std::vector<DeviceInfo>& devices) {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& slot : slots_) {
+  std::string players;
+  for (size_t i = 0; i < slots_.size(); ++i) {
+    auto& slot = slots_[i];
     if (!slot) continue;
     uint32_t ordinal = 0;
-    for (const DeviceInfo& device : devices)
-      if (device.id == slot->id) ordinal = device.ordinal;
+    for (const DeviceInfo& device : devices) {
+      if (device.id == slot->id) {
+        ordinal = device.ordinal;
+        players += fmt::format(" {}=player {}", SlotName(i), ordinal + 1);
+      }
+    }
     slot->ordinal = ordinal;
   }
+  REXLOG_INFO("input: players:{}", players.empty() ? " none" : players);
 }
 
 X_RESULT SwitchInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {

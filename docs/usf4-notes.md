@@ -895,3 +895,23 @@ deliberately no toml or cvar to turn it off (redistributors would).
 - Console (handheld): 169 of 169 frames, 0 late, decode 6.3 ms average / 11.5 ms slowest. The game reads its files
   from about 2 s into the intro and is at its normal frame pacing when it ends; its swapchain comes up about 4 ms
   after the intro (v1, intro before the boot: 1.5 s of GPU-clock check plus 2-4 s of loading on black).
+
+## Controllers for two players (0.7.6, 2026-10-22)
+
+Tester reports (Sphaira forwarder, Joy-Cons attached plus two Pro-style controllers): Start from a controller did
+nothing, controller 2 only worked once Versus asked for player 2, and it sometimes "turned off".
+- Players were numbered by slot order (handheld first), so attached Joy-Cons took player 1 even when unused. Now a
+  slot only becomes a device after its first real button press: players are numbered in the order they are used.
+- The quiet-until-released guard counted the sticks' pseudo-buttons, so a drifting stick kept a pad quiet; it now
+  looks at real buttons only (bits 0-15, SL/SR).
+- xam_input: XUSER_INDEX_ANY / XINPUT_FLAG_ANY_USER merge users 0-3 (state, keystrokes, capabilities) instead of
+  pinning user 0; XamUserGetDeviceContext succeeds for every user with a controller. USF4 itself polls users 0-3
+  with XINPUT_FLAG_GAMEPAD (logged once per user/flags: "input: the game asks ...").
+- Console (tester, usf4_018-027): Start works from controller 1; controller 2 becomes player 2 on its first press.
+  As on the 360, only the player who pressed Start drives the menus; player 2 joins at Versus character select.
+- Controller 2 dropping out happened only with the Ultrahand overlay open (clock changes): HID reports style 0 with
+  no focus change; a button press reconnects it and it is player 2 again.
+- Status Monitor shows the output size (1280x720 / 1920x1080), not the render size: "[res] ... render 960x540"
+  confirms sa2_render_height_* = 540 is applied.
+- Default render height is now 540 handheld and docked (built-in defaults and the usf4.toml written at first start);
+  an existing usf4.toml without these keys gets 540 too. The installer still ships no usf4.toml (no overwrite).

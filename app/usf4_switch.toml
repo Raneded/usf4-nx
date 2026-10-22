@@ -1,4 +1,7 @@
 # Ultra Street Fighter IV settings, read at start.
+# Render height (720 = 1280x720, 1080 = 1920x1080; multiples of 180). Higher is sharper but may drop below 60 fps.
+sa2_render_height_handheld = 540
+sa2_render_height_docked = 540
 # Anti-aliasing: 0 = off, 2 = 2x, 4 = 4x. Smoother edges, more GPU work.
 sa2_msaa = 0
 # true: a frame that misses 60 fps is shown as soon as it is ready (50-59 fps) instead of dropping to 30.
