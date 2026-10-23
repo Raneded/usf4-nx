@@ -918,6 +918,8 @@ nothing, controller 2 only worked once Versus asked for player 2, and it sometim
 
 ## 0.8.0: Renut on deko3d on the Switch (2026-10-23)
 
+The full case study, written for other ports: [deko3d-renderer-usf4.md](deko3d-renderer-usf4.md).
+
 The Switch release draws with Renut's Direct3D-level renderer on deko3d (`docs/renut-census.md`), built with
 `-DUSF4_RENUT_RENDERER=ON -DSA2_RENUT_RELEASE_SHADERS=ON -DREXGLUE_SWITCH_NO_NVK=ON` (`out/nx-release`; Mesa's NVK is
 not linked: 56.3 MB instead of 66.7 MB). The NRO holds no translated game shader: `deko3d_glsl.bin` beside it is made

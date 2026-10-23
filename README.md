@@ -20,6 +20,7 @@ your own disc.
   `usf4.toml`: `"switch"` or `"xbox"`). Video clip recording is turned off.
 
 Version history, measurements and every finding: [docs/usf4-notes.md](docs/usf4-notes.md).
+How the Switch renderer reached 60 fps on deko3d, for other ports: [docs/deko3d-renderer-usf4.md](docs/deko3d-renderer-usf4.md).
 
 ## How to install (Switch)
 
