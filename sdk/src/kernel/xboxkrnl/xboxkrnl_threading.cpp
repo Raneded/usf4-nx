@@ -33,6 +33,7 @@
 #include <rex/system/xevent.h>
 #include <rex/system/xmutant.h>
 #include <rex/system/xsemaphore.h>
+#include <rex/system/wait_watch.h>  // usf4-nx: stall reports
 #include <rex/system/xthread.h>
 #include <rex/system/xtimer.h>
 #include <rex/system/xtypes.h>
@@ -380,7 +381,11 @@ u32 KeDelayExecutionThread_entry(u32 processor_mode, u32 alertable, mapped_u64 i
     thread->DeliverAPCs();
   }
 
+  // usf4-nx: stall reports (wait_watch.h): a relative delay, in ms (an absolute one shows as 0).
+  const int64_t interval = int64_t(uint64_t(*interval_ptr));
+  rex::system::wait_watch::Begin(rex::system::wait_watch::kDelay, interval < 0 ? uint32_t(-interval / 10000) : 0, 0);
   X_STATUS result = thread->Delay(processor_mode, alertable, *interval_ptr);
+  rex::system::wait_watch::End();
 
   if (alertable && result == X_STATUS_USER_APC) {
     thread->DeliverAPCs();

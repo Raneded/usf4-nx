@@ -16,6 +16,10 @@
 #include <rex/system/thread_state.h>
 #include <rex/system/xmemory.h>
 
+#if SA2_RENUT_RENDERER
+#include "renut_engine/gpu/banjo_renut_select.h"
+#endif
+
 REXCVAR_DEFINE_BOOL(usf4_single_tile, false, "USF4",
                     "Draw the scene as one 1280x720 tile without MSAA instead of three predicated-tiling strips with "
                     "2x MSAA (the native renderer draws those with one sample anyway). Read when the game creates its "
@@ -26,12 +30,21 @@ REXCVAR_DEFINE_BOOL(usf4_single_tile, false, "USF4",
 // preset (index into the table at 0x820DE8F0), r24 = the MSAA index (table 0x820DE654).
 namespace {
 bool g_single_tile = false;  // usf4_scene_tiling switched this run to one tile
+
+// One tile with Renut's renderer whatever usf4_single_tile says: it does not take USF4's predicated tiling (its tiling
+// hooks are N&B's, at N&B's device offsets), so only the first strip would reach the screen (docs/renut-census.md).
+bool SingleTile() {
+#if SA2_RENUT_RENDERER
+  if (::banjo::renut_gpu::Active()) return true;
+#endif
+  return REXCVAR_GET(usf4_single_tile);
+}
 }  // namespace
 
 void usf4_scene_tiling(PPCRegister& preset, PPCRegister& msaa) {
   static bool logged = false;
   const uint32_t before_preset = preset.u32, before_msaa = msaa.u32;
-  if (REXCVAR_GET(usf4_single_tile) && preset.u32 == 6) {
+  if (SingleTile() && preset.u32 == 6) {
     preset.u64 = 1;  // 0x820DE8F8: {1, 0x820DE670} = 0,0-1280,720
     msaa.u64 = 0;    // D3DMULTISAMPLE_NONE
     g_single_tile = true;
@@ -39,7 +52,7 @@ void usf4_scene_tiling(PPCRegister& preset, PPCRegister& msaa) {
   if (!logged) {
     logged = true;
     REXLOG_INFO("[usf4] scene tiling: preset {} msaa {} (game's choice: preset {} msaa {}; usf4_single_tile = {})",
-                preset.u32, msaa.u32, before_preset, before_msaa, REXCVAR_GET(usf4_single_tile));
+                preset.u32, msaa.u32, before_preset, before_msaa, SingleTile());
   }
 }
 

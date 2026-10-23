@@ -60,6 +60,16 @@ inline T GuestPtr(u8* base, u32 guest_address) noexcept {
 
 class Memory;
 
+// From sa2-nx (2026-10-20, banjo-nx's SDK): the store cards' page marking, a byte per 4 KB guest page. usf4-nx's
+// generated code marks no store (no tools/store_cards.py), so Renut's renderer does not use them
+// (g_banjo_store_cards = false, app/src/renut_engine/sa2_compat/sa2_compat.cpp); only the helper it calls is here.
+inline void MarkStoreCardsAt(u8* cards, u32 guest_address, u32 length) noexcept {
+  if (!cards || !length) return;
+  const uint64_t end = uint64_t(guest_address) + length - 1;
+  const u32 last = end > 0xFFFFFFFFull ? 0xFFFFFu : u32(end >> 12);
+  for (u32 page = guest_address >> 12; page <= last; ++page) cards[page] = 0;
+}
+
 enum SystemHeapFlag : uint32_t {
   kSystemHeapVirtual = 1 << 0,
   kSystemHeapPhysical = 1 << 1,

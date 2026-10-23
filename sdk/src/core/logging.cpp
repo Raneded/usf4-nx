@@ -43,6 +43,7 @@
 
 #ifdef __SWITCH__
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -388,8 +389,10 @@ std::filesystem::path NextSequentialLogPath(const std::filesystem::path& logs_di
 }
 
 #ifdef __SWITCH__
-// log_network: one TCP connection to a listener on the development machine. Never blocks the game: lines are
-// sent with MSG_DONTWAIT and dropped when the socket is full; after an error the sink goes quiet.
+// log_network: one TCP connection to a listener on the development machine. Never blocks the game: the socket is
+// non-blocking and lines are dropped when it is full; after an error the sink goes quiet. usf4-nx (2026-10-23): with
+// MSG_DONTWAIT alone, a send to a listener that had stopped reading blocked on the console, inside spdlog's sink
+// mutex, and every thread that logged (the game thread among them) waited behind it: the game froze.
 class TcpLogSink : public spdlog::sinks::base_sink<std::mutex> {
  public:
   explicit TcpLogSink(int fd) : fd_(fd) {}
@@ -421,6 +424,11 @@ int ConnectLogNetwork(const std::string& target) {
   if (fd < 0) return -1;
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
     close(fd);
+    return -1;
+  }
+  const int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    close(fd);  // a socket that can block would freeze the game when the listener stops reading
     return -1;
   }
   // printf/fprintf(stderr) of the libraries (NVK's "[nvk] ..." lines) go to the same connection.

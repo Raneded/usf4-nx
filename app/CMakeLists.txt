@@ -45,6 +45,8 @@ set(USF4_SOURCES
     src/usf4_frame_counter.cpp
     # Recordings of the game image for frame-by-frame comparisons (sa2-nx's recorder: sa2_video_s, lockstep).
     src/sa2_capture.cpp
+    # CPU cycles per thread over a lockstep capture (PC; an empty function elsewhere; from sa2-nx).
+    src/profiler/sa2_thread_cycles_pc.cpp
     # Stage 4: the native renderer (src/me, sa2-nx's copy of masseffect-nx's PM4-ring Vulkan renderer as adapted by
     # banjo-nx; files kept as in sa2-nx so its fixes can be taken over). It replaces the emulated Xenos GPU with
     # sa2_renderer_native = true; off by default until it draws USF4 right.
@@ -65,6 +67,10 @@ set(USF4_SOURCES
     src/usf4_gpu_wait.cpp
     src/usf4_job_pop_yield.cpp
     src/usf4_job_wait.cpp
+    # Switch button icons in place of the Xbox ones, for both renderers (usf4_button_icons).
+    src/usf4_button_icons.cpp
+    # Late input for the native renderer (usf4_late_input; Renut has its own).
+    src/usf4_late_input.cpp
     src/usf4_native_copy.cpp
     # The SA2-only parts of the renderer glue that are not ported (native Direct3D layer, census): off.
     src/me/usf4_api_stubs.cpp
@@ -110,6 +116,19 @@ set_source_files_properties(src/cpu/sa2_enhancements.cpp PROPERTIES
 
 # Link the SDK. Stage 3 draws with ReXGlue's Xenos GPU emulation; the native renderer replaces it in stage 4.
 rexglue_setup_target(usf4 GPU_PLUGINS xenos)
+# An emulator (Ryujinx) starts NROs without argv[0]: the SDK then takes the NRO's usual place on the SD for its folder
+# (sdk/src/core/filesystem_posix.cpp, from sa2-nx and banjo-nx). hbloader on the console always passes argv[0].
+if(REXGLUE_PLATFORM_SWITCH AND TARGET rexcore)
+    target_compile_definitions(rexcore PRIVATE REX_SWITCH_FALLBACK_EXE="/switch/usf4-nx/usf4.nro")
+endif()
+
+# Renut's Direct3D-level renderer (reNut by masterspike52, through banjo-nx and sa2-nx; docs/renut-census.md): no PM4
+# ring, no EDRAM; plume's Vulkan back end on the PC and banjo-nx's deko3d back end on the Switch. Linked in with this
+# option, chosen at boot with sa2_renderer = "renut". Off until it draws USF4 (the Switch build needs its deko3d tools).
+option(USF4_RENUT_RENDERER "Link Renut's Direct3D-level renderer (sa2_renderer = renut)" OFF)
+if(USF4_RENUT_RENDERER)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sa2_renut_gpu.cmake")
+endif()
 
 # SPIR-V initializers of the native renderer's EDRAM transfer / utility shaders (src/me/native/shaders), compiled
 # on the host with glslangValidator (built from the SDK's glslang into out/glslang: cmake -S sdk/thirdparty/glslang -B out/glslang, target glslangValidator). The Switch build
@@ -221,6 +240,18 @@ if(REXGLUE_PLATFORM_SWITCH)
     # Fixed settings compiled in, and the player's usf4.toml written next to the NRO when missing.
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch_defaults.toml" USF4_BUILTIN_CONFIG)
     file(READ "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch.toml" USF4_PLAYER_CONFIG)
+    # Renut (2026-10-23): 720p in both modes. It has no 540p (render scale codes 0-7 are all used); on the console a
+    # Training fight is 59.9 fps at 720p docked with the GPU at 845 MHz (~9 ms a frame), and handheld players are taken
+    # to run the GPU at 768 MHz or more (~10 ms). The NVK build keeps 540.
+    if(USF4_RENUT_RENDERER)
+        foreach(var USF4_BUILTIN_CONFIG USF4_PLAYER_CONFIG)
+            string(REGEX REPLACE "(sa2_render_height_(handheld|docked) = )540" "\\1720" ${var} "${${var}}")
+        endforeach()
+        # Renut on deko3d is this build's renderer (2026-10-23 console A/B: 720p 60 fps with GPU 8.4 ms, render thread
+        # 2.8 ms, CPU 110 %, against the native renderer's 53 fps at 720p). The core layout stays off (it made the game
+        # thread stall more in Ryujinx).
+        string(APPEND USF4_BUILTIN_CONFIG "\n# Renut build (app/CMakeLists.txt): Renut's renderer on deko3d.\nsa2_renderer = \"renut\"\nrenut_gpu_backend = \"deko3d\"\nsa2_renut_core_layout = false\n")
+    endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
                  "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch_defaults.toml" "${CMAKE_CURRENT_SOURCE_DIR}/usf4_switch.toml")
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/usf4_builtin_config.h.in"
@@ -237,6 +268,6 @@ if(REXGLUE_PLATFORM_SWITCH)
     rexglue_switch_add_nro(usf4
         NAME "Ultra Street Fighter IV"
         AUTHOR "Thorhax"
-        VERSION "0.7.6"
+        VERSION "0.8.0"
         ICON "${USF4_NRO_ICON}")
 endif()

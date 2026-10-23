@@ -18,6 +18,8 @@
 #include <rex/input/flags.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
+#include <rex/input/read_hook.h>  // usf4-nx (2026-10-22, from sa2-nx)
+#include <atomic>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/input/nop/nop_input_driver.h>
 #if REX_PLATFORM_SWITCH
@@ -250,8 +252,17 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
   return driver->GetDeviceCapabilities(chosen, flags, out_caps);
 }
 
+// From sa2-nx (2026-10-20, rex/input/read_hook.h): the app's function called before every controller state read.
+namespace {
+std::atomic<ReadHook> g_read_hook{nullptr};
+}  // namespace
+
+void SetReadHook(ReadHook hook) { g_read_hook.store(hook, std::memory_order_release); }
+
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
+  if (const ReadHook hook = g_read_hook.load(std::memory_order_acquire))
+    hook();  // Renut's late input and latency probe (banjo-nx's input latency set; sa2-nx)
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }

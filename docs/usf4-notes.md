@@ -915,3 +915,45 @@ nothing, controller 2 only worked once Versus asked for player 2, and it sometim
   confirms sa2_render_height_* = 540 is applied.
 - Default render height is now 540 handheld and docked (built-in defaults and the usf4.toml written at first start);
   an existing usf4.toml without these keys gets 540 too. The installer still ships no usf4.toml (no overwrite).
+
+## 0.8.0: Renut on deko3d on the Switch (2026-10-23)
+
+The Switch release draws with Renut's Direct3D-level renderer on deko3d (`docs/renut-census.md`), built with
+`-DUSF4_RENUT_RENDERER=ON -DSA2_RENUT_RELEASE_SHADERS=ON -DREXGLUE_SWITCH_NO_NVK=ON` (`out/nx-release`; Mesa's NVK is
+not linked: 56.3 MB instead of 66.7 MB). The NRO holds no translated game shader: `deko3d_glsl.bin` beside it is made
+by the installer page from the player's disc (the page's `lib/deko3d.js`, from sa2-nx-installer; its translator is
+this repository's `app/thirdparty/reblue-XenosRecomp` with `tools/renut_hlsl_frontend.cpp`). 720p in both modes (Renut
+has no 540p).
+
+Console measurements (V1, docked, Training fight, 2 minutes each):
+
+| | NVK 540p (0.7.6) | NVK 720p | Renut 720p |
+|---|---|---|---|
+| fps | 59.9 | 53.5 | 59.9 |
+| GPU per frame | 6.9 ms | 9.3 ms | 8.4 ms |
+| ring / render thread | 7.4 ms | 18.6 ms | 2.8 ms |
+| CPU total (of 400 %) | 167 % | 155 % | 110 % |
+
+Renut at GPU 768 MHz: Training 59.9 fps (GPU 8.8 ms); attract-mode fights on four stages 59.2-59.9 fps (GPU 8-11 ms,
+render thread 4.7-8.2 ms). Lesson from the first comparison: without `sa2_shaders.mesp` beside the NRO the native
+renderer draws nothing (every draw "no VS entry, no PS entry", sys-botbase screenshots black) and still reports 60 fps;
+its first numbers were of an empty frame.
+
+Also in 0.8.0:
+
+- **Maxwell clips to the smallest bound target:** USF4 leaves a 320x180 depth target bound while it draws full-screen
+  passes; a draw (or colour clear) that neither tests nor writes depth no longer binds a smaller depth target
+  (`render/draw.cpp`). Before, menus and fights showed only the top-left 320x180 on the console.
+- **Linear textures:** a linear texture unchanged at 60 full checks gets the tiled textures' sampled hash each frame
+  and its full hash every 16 frames (`usf4_renut_static_linear_textures`): the render thread hashed 11 GB every 10 s in a
+  fight; 6.4 -> 2.8 ms a frame.
+- **Late input** counts the game's frame limiter wait (`usf4_late_input_limiter_margin_us`, 3 ms more margin): input ->
+  display 34 -> ~31 ms with no extra dropped frames; the native renderer has the same (`src/usf4_late_input.cpp`).
+- **Switch button icons** (`usf4_button_icons`, `src/usf4_button_icons.cpp`): USF4's prompts are 32x32 textures of their
+  own (A, B, X balls, RB, BACK in two forms), known by a hash of their bytes and redrawn at upload, for both renderers.
+- **Log network sink:** non-blocking socket; a stalled listener had frozen the game behind spdlog's sink mutex.
+- **Wait tracker** (`sdk/src/system/wait_watch.cpp`) and the `[waits]` stall report (`usf4_stall_report_s`).
+- First play with empty caches: the first fight's load compiles ~90 shaders (~7.6 s once; kept in `deko3d_shaders.bin`).
+
+Updating from 0.7.x: `sa2_shaders.mesp`, `sa2_shaders.mesp.idx` and `cache/sa2_native_pipelines.bin` are no longer used
+and can be deleted; `usf4.toml`'s 540 render height draws at 720.

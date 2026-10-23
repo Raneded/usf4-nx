@@ -65,3 +65,7 @@ __pycache__/
 
 # --- Personal NRO icon (may be game artwork; used instead of app/icon.jpg when present) ---
 /app/icon_local.jpg
+
+# --- Renut's translator: DXC's binaries (Microsoft's release, copied in by hand; docs/renut-census.md) ---
+/app/thirdparty/reblue-XenosRecomp/thirdparty/dxc-bin/bin/
+/app/thirdparty/reblue-XenosRecomp/thirdparty/dxc-bin/lib/

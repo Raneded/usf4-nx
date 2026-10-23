@@ -41,6 +41,10 @@
 
 #include "cpu/sa2_enhancements.h"
 #include "usf4_frame_probe.h"
+#include "usf4_late_input.h"
+#if SA2_RENUT_RENDERER
+#include "renut_engine/gpu/backend/render_thread.h"
+#endif
 
 SA2_ENHANCEMENT(g_job_wait_block, usf4_cpu_job_wait_block, sa2::enh::kCpu, true,
                 "The main thread's wait for its jobs (Sleep(0) loop in sub_82966C90) sleeps until a job finishes "
@@ -54,6 +58,13 @@ REXCVAR_DEFINE_INT32(usf4_job_wait_spin_us, 20, "USF4",
 SA2_ENHANCEMENT(g_frame_limiter_sleep, usf4_cpu_frame_limiter_sleep, sa2::enh::kCpu, true,
                 "The game's frame limiter (Sleep(0) loop in sub_82756DE8) sleeps for the time still missing to the "
                 "next frame, minus a margin, instead of spinning on yields");
+
+REXCVAR_DEFINE_INT32(usf4_late_input_limiter_margin_us, 3000, "USF4",
+                     "Late input (usf4_late_input; Renut's banjo_late_input): of the time the game's frame limiter still had to wait, "
+                     "this much is not used to read the controller later (on top of late input's own 2 ms), so a frame "
+                     "whose work runs long still makes its refresh. Console 2026-10-23 with 0: input -> display 34 -> "
+                     "29 ms, one frame of 30 ms a minute in a fight (none without)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_INT32(usf4_frame_limiter_margin_us, 1000, "USF4",
                      "usf4_cpu_frame_limiter_sleep: the limiter sleeps until this many microseconds before the frame "
@@ -155,6 +166,17 @@ bool LimiterOn(uint8_t* base) {
 void LimiterSleep(double elapsed, double period) {
   static const int64_t margin_ns = int64_t(REXCVAR_GET(usf4_frame_limiter_margin_us)) * 1000;
   const double missing = period - elapsed;
+  // usf4-nx (2026-10-23): the frame's work ended this early: late input may read the controller that much later, less
+  // usf4_late_input_limiter_margin_us (the game's frame work varies more than the 2 ms late input keeps). Renut's and
+  // the native renderer's (usf4_late_input.cpp) each take it; only the one in use applies it.
+  static const int64_t limiter_margin_us = REXCVAR_GET(usf4_late_input_limiter_margin_us);
+  if (missing > 0.0 && missing < 0.1 && int64_t(missing * 1e6) > limiter_margin_us) {
+    const uint32_t slack = uint32_t(int64_t(missing * 1e6) - limiter_margin_us);
+    usf4::late_input::NoteLimiterSlack(slack);
+#if SA2_RENUT_RENDERER
+    renut::gpu::render_thread::NoteFrameLimiterSlack(slack);
+#endif
+  }
   int64_t ns = (missing > 0.0 && missing < 0.1) ? int64_t(missing * 1e9) - margin_ns : 0;
   if (ns <= 0) {
     Yield();

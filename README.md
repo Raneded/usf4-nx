@@ -13,8 +13,11 @@ your own disc.
 ## Status
 
 - **PC (Windows):** boots, menus and fights work with the native Vulkan renderer at 60 fps.
-- **Switch (Atmosphère, homebrew NRO):** fights hold 60 fps at 540p with CPU 1785 MHz and GPU 768 MHz, the top
-  docked-mode clocks (set with sys-clk; tested with memory at 2700 MHz). Video clip recording is turned off.
+- **Switch (Atmosphère, homebrew NRO):** since 0.8.0 the game draws with Renut's renderer on deko3d, the Switch's own
+  graphics API (reNut by masterspike52, used with the author's permission, as banjo-nx and sa2-nx carry it), at 1280x720 in
+  handheld and docked mode. Fights hold 60 fps with the CPU at 1785 MHz and the GPU at 768 MHz (Training and the
+  attract-mode fights, measured on a console in October 2026). The menus show Switch buttons (`usf4_button_icons` in
+  `usf4.toml`: `"switch"` or `"xbox"`). Video clip recording is turned off.
 
 Version history, measurements and every finding: [docs/usf4-notes.md](docs/usf4-notes.md).
 
@@ -27,17 +30,19 @@ Version history, measurements and every finding: [docs/usf4-notes.md](docs/usf4-
    repository's releases, and makes the shaders and the game folder from your files.
 3. Extract the downloaded `usf4-nx.zip` (about 8 GB) into `sdmc:/switch/`.
 
-Your `usf4-nx` folder then holds `usf4.nro`, `LICENSES.txt`, the shader package (`sa2_shaders.mesp` + `.idx`) and the
-game files in `game_root/`. Start `usf4.nro` with a title takeover (hold **R** while launching an installed game) or a
+Your `usf4-nx` folder then holds `usf4.nro`, `LICENSES.txt`, the renderer's shaders (`deko3d_glsl.bin`, made from your
+disc) and the game files in `game_root/`. Start `usf4.nro` with a title takeover (hold **R** while launching an installed game) or a
 forwarder with full memory; the album applet does not give the game enough memory. The game writes `usf4.toml` (your
 settings) at its first start.
 
 **Updating:** open the installer page again and press **Create usf4-nx-update.zip**: it only holds the new NRO and the
-shaders. Extract it over your folder; your settings and game files stay.
+shaders. Extract it over your folder; your settings and game files stay. From 0.7.x, `sa2_shaders.mesp` and
+`sa2_shaders.mesp.idx` are no longer used and can be deleted. If your `usf4.toml` sets the render height to 540, 0.8.0
+draws at 720 anyway (its renderer has no 540p).
 
-**The first time you play,** new places can stutter for a moment while the graphics pipelines are compiled; they are
-kept on the SD card for the next sessions. Fights hold 60 fps with the CPU at 1785 MHz and the GPU at 768 MHz (set with
-sys-clk; memory tested at 2700 MHz).
+**The first time you play,** new places can stop for a moment while their shaders are compiled (the first fight's
+loading screen can take several seconds longer); they are kept on the SD card (`deko3d_shaders.bin`) for the next
+sessions. Fights hold 60 fps with the CPU at 1785 MHz and the GPU at 768 MHz (set with sys-clk).
 
 ## Building
 

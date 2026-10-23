@@ -43,6 +43,7 @@
 #include <xxhash.h>
 
 #include "me/me_native_system.h"
+#include "renut_engine/gpu/sa2_renut_yield.h"  // sa2_renderer = "renut"
 
 REXCVAR_DEFINE_BOOL(usf4_dump_shaders, false, "USF4",
                     "Write every shader container the game creates to shaders/ next to the executable "
@@ -100,6 +101,7 @@ void DumpShaderBlob(const uint8_t* base, uint32_t blob_address, bool vertex) {
 // Draw-time shader load (the third call of every Draw*'s state flush).
 REX_EXTERN(__imp__sub_82200438);
 REX_HOOK_RAW(sub_82200438) {
+  SA2_RENUT_YIELD(sub_82200438)
   const uint32_t device = ctx.r3.u32;
   if (device >= 0x40000000 && device < 0x7F000000) {
     const uint32_t vs = Load32(base, device + kDeviceVertexShader), ps = Load32(base, device + kDevicePixelShader);
@@ -111,17 +113,22 @@ REX_HOOK_RAW(sub_82200438) {
   __imp__sub_82200438(ctx, base);
 }
 
-#define USF4_DRAW_HOOK(addr, name)                                                                         \
+// yield: what the hook does instead with sa2_renderer = "renut" (sa2_renut_yield.h).
+#define USF4_DRAW_HOOK(addr, name, yield)                                                                  \
   REX_EXTERN(__imp__sub_##addr);                                                                          \
   REX_HOOK_RAW(sub_##addr) { /* name */                                                                   \
+    yield(sub_##addr)                                                                                     \
     me::native::NoteDrawCall(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, nullptr); \
     __imp__sub_##addr(ctx, base);                                                                         \
   }
 
-USF4_DRAW_HOOK(821F4B88, D3DDevice_DrawVertices)
-USF4_DRAW_HOOK(821F4FA0, D3DDevice_DrawIndexedVertices)
-USF4_DRAW_HOOK(821F40A0, D3DDevice_DrawVerticesUP)
-USF4_DRAW_HOOK(821F45A8, D3DDevice_DrawIndexedVerticesUP)
+USF4_DRAW_HOOK(821F4B88, D3DDevice_DrawVertices, SA2_RENUT_YIELD_SHARED)
+USF4_DRAW_HOOK(821F4FA0, D3DDevice_DrawIndexedVertices, SA2_RENUT_YIELD_SHARED)
+// These two are BeginVertices and BeginIndexedVertices, the inline draws' first half (docs/renut-census.md; called
+// from DrawVerticesUP sub_821F4560 and DrawIndexedVerticesUP sub_821F4AE8). Renut hooks BeginVertices, and replaces
+// DrawIndexedVerticesUP whole.
+USF4_DRAW_HOOK(821F40A0, D3DDevice_DrawVerticesUP, SA2_RENUT_YIELD_SHARED)
+USF4_DRAW_HOOK(821F45A8, D3DDevice_DrawIndexedVerticesUP, SA2_RENUT_YIELD)
 
 REX_EXTERN(__imp__sub_821E5D60);
 REX_HOOK_RAW(sub_821E5D60) {  // D3DDevice_CreateVertexShader (r3 = the container blob)

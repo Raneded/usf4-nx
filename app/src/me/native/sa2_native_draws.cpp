@@ -29,6 +29,7 @@
 //   rectangle lists, line loops and vertex formats without a direct Vulkan
 //   equivalent.
 
+#include "usf4_button_icons.h"  // usf4-nx: Switch button icons (app/src)
 #include "cpu/sa2_enhancements.h"
 #include "sa2_deferred_recording.h"
 #include "sa2_native_draws.h"
@@ -2033,6 +2034,10 @@ constexpr uint16_t kSwizzleRRRR = 0;
 constexpr uint16_t kSwizzleRGGG = (1 << 3) | (1 << 6) | (1 << 9);
 constexpr uint16_t kSwizzleRGBA = (1 << 3) | (2 << 6) | (3 << 9);
 constexpr uint16_t kSwizzleBGRA = 2 | (1 << 3) | (0 << 6) | (3 << 9);
+
+// usf4-nx (2026-10-23, usf4_button_icons): the byte of an untiled 8:8:8:8 texel that holds alpha here (A first: the
+// icons' dumps on the console have alpha 0 in the corners there).
+constexpr uint32_t kIconAlphaByte = 0;
 
 struct TextureFormat {
   VkFormat format = VK_FORMAT_UNDEFINED;
@@ -9544,6 +9549,23 @@ class DrawsVulkanImpl final : public DrawsVulkan {
           slot = 0;  // the image remains uninitialized
         }
         return;
+      }
+    }
+    // usf4-nx (2026-10-23, usf4_button_icons): the Xbox button icons (32x32, 8:8:8:8 or BC3) redrawn as the Switch's
+    // in the first layer's base level, before the copy. kIconAlphaByte: where this renderer's 8:8:8:8 bytes keep alpha.
+    if (!volume && read_base && layers >= 1 &&
+        ((tf.block == 1 && tf.bytes == 4) ||
+         tf.format == VK_FORMAT_BC3_UNORM_BLOCK || tf.format == VK_FORMAT_BC3_SRGB_BLOCK)) {
+      const auto icon_format = tf.block == 1 ? usf4::button_icons::Format::Rgba8 : usf4::button_icons::Format::Bc3;
+      const uint32_t icon_pitch = blocks_x_host * tf.bytes;
+      // The guest size: the pool's image can be larger (its rows are blocks_x_host wide all the same).
+      if (usf4::button_icons::Candidate(width, height, icon_format)) {
+        char tag[48];
+        std::snprintf(tag, sizeof(tag), "vk%u_u%u_s%04X", unsigned(tf.format), unsigned(tf.unit_order),
+                      unsigned(tf.swizzle_host));
+        usf4::button_icons::Dump(data.data(), width, height, icon_pitch, icon_format, tag);
+        usf4::button_icons::Paint(data.data(), width, height, icon_pitch, icon_format, kIconAlphaByte,
+                                  tf.unit_order == 2);
       }
     }
     // Mip levels. Those in the packed tail share a region and are located with PackedDisplacement;

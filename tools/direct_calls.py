@@ -53,6 +53,12 @@ def hooked():
                 text = open(path, encoding='utf-8', errors='ignore').read()
             except OSError:
                 continue
+            if os.path.join('src', 'renut_engine') in path:
+                # From sa2-nx (2026-10-20): Renut's renderer (app/src/renut_engine) names N&B's addresses in constants
+                # and in files the build leaves out; only its hook macros at USF4's addresses hook (BANJO_RENUT_HOOK*).
+                for m in re.findall(r'BANJO_RENUT_HOOK[A-Z_]*\(sub_([0-9A-Fa-f]{8})', CodeOnly(text)):
+                    names.add('sub_' + m.upper())
+                continue
             if path.endswith(CODE_SUFFIXES):
                 text = CodeOnly(text)
             for m in re.findall(r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])', text):

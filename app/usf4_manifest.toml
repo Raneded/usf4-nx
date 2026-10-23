@@ -8,7 +8,7 @@
 
 [project]
 name = "usf4"
-sdk_version = "0.10.0"
+sdk_version = "0.7.6"
 # Your own game files: the extracted disc (assets/game_root, made by tools/extract_iso.py). The disc names the
 # executable Default.xex (capital D). Nothing from the game is distributed with this project.
 game_root = "../assets/game_root"

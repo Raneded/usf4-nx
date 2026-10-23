@@ -15,6 +15,7 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
+#include <rex/system/wait_watch.h>  // usf4-nx: stall reports
 #include <rex/system/xobject.h>
 // #include <rex/kernel/xboxkrnl/private.h>  // TODO: JIT only
 #include <rex/system/xenumerator.h>
@@ -30,6 +31,17 @@
 #include "global_lock_spin.h"
 
 namespace rex::system {
+
+void ApplyGuestCoreLayoutAtWait();  // usf4-nx (from sa2-nx): xthread.cpp, RexSetGuestThreadCoreLayout
+
+namespace {
+// usf4-nx (2026-10-23): what a wait is on, for wait_watch's stall reports: the guest object, else the handle.
+uint32_t WatchId(const XObject* object) {
+  if (object->guest_object()) return object->guest_object();
+  const auto& handles = const_cast<XObject*>(object)->handles();
+  return handles.empty() ? 0 : handles[0];
+}
+}  // namespace
 
 XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
   handles_.reserve(10);
@@ -204,6 +216,7 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
 
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
                        uint64_t* opt_timeout) {
+  ApplyGuestCoreLayoutAtWait();  // usf4-nx (from sa2-nx): Renut's core layout
   auto wait_handle = GetWaitHandle();
   if (!wait_handle) {
     // Object doesn't support waiting.
@@ -215,7 +228,9 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  wait_watch::Begin(wait_watch::kWait, WatchId(this), uint32_t(type()));
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  wait_watch::End();
   XThread::CheckTitleTermination();
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
@@ -237,13 +252,16 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, uint32_t wait_reason,
                                 uint32_t processor_mode, uint32_t alertable,
                                 uint64_t* opt_timeout) {
+  ApplyGuestCoreLayoutAtWait();  // usf4-nx (from sa2-nx): Renut's core layout
   auto timeout_ms = opt_timeout ? std::chrono::milliseconds(chrono::Clock::ScaleGuestDurationMillis(
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
+  wait_watch::Begin(wait_watch::kSignalAndWait, WatchId(wait_object), uint32_t(wait_object->type()));
   auto result =
       rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
                                  alertable ? true : false, timeout_ms);
+  wait_watch::End();
   switch (result) {
     case rex::thread::WaitResult::kSuccess:
       wait_object->WaitCallback();
@@ -264,6 +282,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
 X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_type,
                                uint32_t wait_reason, uint32_t processor_mode, uint32_t alertable,
                                uint64_t* opt_timeout) {
+  ApplyGuestCoreLayoutAtWait();  // usf4-nx (from sa2-nx): Renut's core layout
   std::vector<rex::thread::WaitHandle*> wait_handles(count);
   for (size_t i = 0; i < count; ++i) {
     wait_handles[i] = objects[i]->GetWaitHandle();
@@ -275,9 +294,13 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  // usf4-nx: the first object stands for the set in stall reports (wait_type in the kind's high byte).
+  wait_watch::Begin(wait_watch::Kind(wait_watch::kWaitMultiple | (wait_type ? 0x100u : 0u)),
+                    count ? WatchId(objects[0]) : 0, count ? uint32_t(objects[0]->type()) : 0);
   if (wait_type) {
     auto result =
         rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
+    wait_watch::End();
     XThread::CheckTitleTermination();
     switch (result.first) {
       case rex::thread::WaitResult::kSuccess:
@@ -299,6 +322,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
   } else {
     auto result =
         rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
+    wait_watch::End();
     XThread::CheckTitleTermination();
     switch (result) {
       case rex::thread::WaitResult::kSuccess:

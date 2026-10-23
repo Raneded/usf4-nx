@@ -397,6 +397,19 @@ void FollowMode(bool effective_docked, bool docked_real) {
   }
 }
 
+bool SetCpuGpuOverride(uint32_t cpu_hz, uint32_t gpu_hz) {
+  if (!Open()) {
+    return false;
+  }
+  // Modules 0 (CPU) and 1 (GPU) only: module 2, the memory, is never sent. Not marked in g_set, so Drop() and the
+  // exit never release them.
+  const Result cpu = PutOverride(0, cpu_hz);
+  const Result gpu = PutOverride(1, gpu_hz);
+  std::fprintf(stderr, "[clocks] test override: CPU %u kHz (0x%X), GPU %u kHz (0x%X); memory untouched\n",
+               cpu_hz / 1000u, (unsigned)cpu, gpu_hz / 1000u, (unsigned)gpu);
+  return R_SUCCEEDED(cpu) && R_SUCCEEDED(gpu);
+}
+
 void Enable(bool enabled) {
   g_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
   if (!enabled && g_applied) {

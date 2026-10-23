@@ -19,6 +19,7 @@ set(REXSYSTEM_SOURCES
     xsocket.cpp
     xsymboliclink.cpp
     xobject.cpp
+    wait_watch.cpp  # usf4-nx: stall reports
     xmodule.cpp
     guest_path.cpp
 

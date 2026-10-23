@@ -18,6 +18,10 @@ uint32_t WantedScaleQuarters();
 
 // The render scale of one mode (as WantedScaleQuarters, without the log line): the pipeline prewarm list keeps the
 // line pipelines of both modes.
+// The render height set for a mode (sa2_render_height_docked / _handheld, as set: not rounded, not gated by
+// sa2_gpu_render_scale). Renut's renderer follows the mode with its own key (sa2_renut_dock_resolution; from sa2-nx).
+int32_t RenderHeightOf(bool docked);
+
 uint32_t ScaleQuartersOf(bool docked);
 
 // The current mode (the console's on the Switch, the simulated one on the PC).

@@ -27,10 +27,15 @@ void FollowMode(bool effective_docked, bool docked_real);
 // Turns all of this on or off (the game passes it from its cvar). Turning it off releases the clocks.
 void Enable(bool enabled);
 
+// usf4-nx (2026-10-23, tests): the CPU's and the GPU's override (Hz; 0 releases that one), never the memory's (a
+// memory clock change can need a reboot). Not released at exit: it stays until set again here or in the overlay.
+bool SetCpuGpuOverride(uint32_t cpu_hz, uint32_t gpu_hz);
+
 #else
 
 inline void FollowMode(bool, bool) {}
 inline void Enable(bool) {}
+inline bool SetCpuGpuOverride(uint32_t, uint32_t) { return false; }
 
 #endif  // REX_PLATFORM_SWITCH
 
