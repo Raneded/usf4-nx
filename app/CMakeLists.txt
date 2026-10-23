@@ -99,9 +99,7 @@ else()
     add_executable(usf4 ${USF4_SOURCES})
 endif()
 
-# The Thorhax intro video at startup (app/thorhax_intro; plays on the Switch only).
-include(thorhax_intro/thorhax_intro.cmake)
-thorhax_intro_add(usf4)
+# Thorhax startup intro disabled: do not compile or embed the intro video/audio.
 
 # The codegen flavour (tools/codegen.sh --flavor) names the build in the first "[enh]" log line (sa2-nx).
 set(USF4_FLAVOR_FILE "${CMAKE_CURRENT_SOURCE_DIR}/generated/codegen_flavor.txt")
